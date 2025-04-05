@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, atomic::Ordering, atomic::AtomicUsize};
 use std::thread;
 use std::time::Duration;
 
@@ -149,43 +149,90 @@ fn start_worker(rx: mpsc::Receiver<Message>) {
     });
 }
 
+struct Hypervisor {
+    worker_tx: mpsc::Sender<Message>,
+    result_tx: mpsc::Sender<(TaskId, Vec<i32>)>,
+    result_rx: mpsc::Receiver<(TaskId, Vec<i32>)>,
+    task_counter: Arc<AtomicUsize>,
+}
+
+impl Hypervisor {
+    fn new() -> Self {
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let task_counter = Arc::new(AtomicUsize::new(0));
+        start_worker(worker_rx);
+        Self {
+            worker_tx,
+            result_tx,
+            result_rx,
+            task_counter
+        }
+    }
+}
+
+
+impl Hypervisor {
+    fn create_task(&self, id: TaskId, script: &str, vars: Vec<i32>) {
+        self.task_counter.fetch_add(1, Ordering::SeqCst);
+        self.worker_tx.send(Message::CreateTask {
+            id,
+            script: script.to_string(),
+            variables: vars,
+            result_tx: self.result_tx.clone(),
+        }).unwrap();
+    
+        println!("[Hypervisor] Created task {id}");
+    }
+    
+
+    fn update_task(&self, id: TaskId, index: usize, new_value: i32) {
+        self.worker_tx.send(Message::UpdateTask {
+            id,
+            index,
+            new_value,
+        }).unwrap();
+
+        println!("[Hypervisor] Sent update to task {id}: var[{index}] = {new_value}");
+    }
+
+    fn query_task(&self, id: TaskId) {
+        let (resp_tx, resp_rx) = mpsc::channel();
+        self.worker_tx.send(Message::QueryTask {
+            id,
+            response_tx: resp_tx,
+        }).unwrap();
+
+        if let Ok(vars) = resp_rx.recv() {
+            println!("[Hypervisor] Query result for task {id}: {:?}", vars);
+        }
+    }
+
+    fn listen_for_results(&self) {
+        while self.task_counter.load(Ordering::SeqCst) > 0 {
+            if let Ok((id, vars)) = self.result_rx.recv() {
+                println!("[Hypervisor] Task {id} completed with variables: {:?}", vars);
+                self.task_counter.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    
+        println!("[Hypervisor] All tasks completed. Exiting.");
+    }
+    
+}
+
+
 fn main() {
-    let (tx, rx) = mpsc::channel();
-    start_worker(rx);
+    let hypervisor = Hypervisor::new();
 
-    let task_id = 1;
-    let (result_tx, result_rx) = mpsc::channel();
-
-    tx.send(Message::CreateTask {
-        id: task_id,
-        script: "2a1a".into(),
-        variables: vec![10, 20],
-        result_tx,
-    }).unwrap();
+    hypervisor.create_task(1, "2a1a", vec![10, 20]);
 
     thread::sleep(Duration::from_secs(1));
-    tx.send(Message::UpdateTask {
-        id: task_id,
-        index: 0,
-        new_value: 99,
-    }).unwrap();
+    hypervisor.update_task(1, 0, 99);
 
     thread::sleep(Duration::from_secs(2));
+    hypervisor.query_task(1);
 
-    let (resp_tx, resp_rx) = mpsc::channel();
-    tx.send(Message::QueryTask {
-        id: task_id,
-        response_tx: resp_tx,
-    }).unwrap();
-
-    if let Ok(vars) = resp_rx.recv() {
-        println!("[Server] Query response for Task {task_id}: {:?}", vars);
-    }
-
-    if let Ok((tid, final_vars)) = result_rx.recv() {
-        println!("[Server] Task {tid} completed with final variables: {:?}", final_vars);
-    }
-
-    thread::sleep(Duration::from_secs(1));
+    hypervisor.listen_for_results();
 }
 
