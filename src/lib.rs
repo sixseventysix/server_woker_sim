@@ -32,21 +32,21 @@ enum Message {
     },
     UpdateTask {
         id: TaskId,
-        index: usize,
+        idx: usize,
         new_value: i32,
         result_tx: mpsc::Sender<TaskResult>,
     },
     QueryTask {
         id: TaskId,
-        response_tx: mpsc::Sender<Vec<i32>>,
+        idx: usize,
         result_tx: mpsc::Sender<TaskResult>,
     },
 }
 
 #[derive(Debug)]
 enum TaskControl {
-    UpdateVar { index: usize, new_value: i32 },
-    QueryVar { response_tx: mpsc::Sender<Vec<i32>> },
+    UpdateVar { idx: usize, new_value: i32, result_tx: mpsc::Sender<TaskResult> },
+    QueryVar { idx: usize, result_tx: mpsc::Sender<TaskResult> },
 }
 
 #[derive(Debug)]
@@ -62,6 +62,8 @@ pub enum TaskResult {
     InitError(TaskId, String),
     Throttled(TaskId),
     NotFound(TaskId, &'static str),
+    QueryResult(TaskId, Result<i32, usize>),
+    UpdateResult(TaskId, Result<(), usize>),
 }
 
 pub fn task_init(id: TaskId, script: &str, variables: Vec<i32>) -> Result<Task, String> {
@@ -121,14 +123,21 @@ fn task_loop(mut task: Task, rx: mpsc::Receiver<TaskControl>, result_tx: mpsc::S
 
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                TaskControl::UpdateVar { index, new_value } => {
-                    if let Some(var) = task.variables.get_mut(index) {
-                        log!("[Task {}] Updating var[{index}] to {}", task.id, new_value);
-                        *var = new_value;
-                    }
+                TaskControl::QueryVar { idx, result_tx } => {
+                    let result = task.variables.get(idx)
+                        .cloned()
+                        .ok_or(idx);
+                    let _ = result_tx.send(TaskResult::QueryResult(task.id, result));
                 }
-                TaskControl::QueryVar { response_tx } => {
-                    let _ = response_tx.send(task.variables.clone());
+                TaskControl::UpdateVar { idx, new_value, result_tx } => {
+                    let result = match task.variables.get_mut(idx) {
+                        Some(var) => {
+                            *var = new_value;
+                            Ok(())
+                        }
+                        None => Err(idx),
+                    };
+                    let _ = result_tx.send(TaskResult::UpdateResult(task.id, result));
                 }
             }
         }
@@ -140,7 +149,6 @@ fn task_loop(mut task: Task, rx: mpsc::Receiver<TaskControl>, result_tx: mpsc::S
         }
     }
 }
-
 
 fn start_worker(rx: mpsc::Receiver<Message>, task_counter: Arc<AtomicUsize>) {
     let task_map = Arc::new(Mutex::new(HashMap::new()));
@@ -159,11 +167,11 @@ fn start_worker(rx: mpsc::Receiver<Message>, task_counter: Arc<AtomicUsize>) {
                         Ok(task) => { 
                             let (task_tx, task_rx) = mpsc::channel();
                             task_map.lock().unwrap().insert(id, task_tx);
-
-                            let tc = Arc::clone(&task_counter);
+                            let task_map_cloned = Arc::clone(&task_map);
 
                             thread::spawn(move || {
                                 task_loop(task, task_rx, result_tx);
+                                task_map_cloned.lock().unwrap().remove(&id);
                             });
 
                             log!("[Worker] Task {id} created");
@@ -175,17 +183,17 @@ fn start_worker(rx: mpsc::Receiver<Message>, task_counter: Arc<AtomicUsize>) {
                     }
                 }
 
-                Message::UpdateTask { id, index, new_value, result_tx } => {
+                Message::UpdateTask { id, idx, new_value, result_tx } => {
                     if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::UpdateVar { index, new_value }).ok();
+                        tx.send(TaskControl::UpdateVar { idx, new_value, result_tx }).ok();
                     } else {
                         let _ = result_tx.send(TaskResult::NotFound(id, "Update target not found"));
                     }
                 }
 
-                Message::QueryTask { id, response_tx, result_tx } => {
+                Message::QueryTask { id, idx, result_tx } => {
                     if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::QueryVar { response_tx }).ok();
+                        tx.send(TaskControl::QueryVar { idx, result_tx }).ok();
                     } else {
                         let _ = result_tx.send(TaskResult::NotFound(id, "Query target not found"));
                     }
@@ -217,7 +225,6 @@ impl Hypervisor {
     }
 }
 
-
 impl Hypervisor {
     pub fn create_task(&self, id: TaskId, script: &str, vars: Vec<i32>) {
         self.task_counter.fetch_add(1, Ordering::SeqCst);
@@ -232,33 +239,30 @@ impl Hypervisor {
     }
     
 
-    pub fn update_task(&self, id: TaskId, index: usize, new_value: i32) {
+    pub fn update_task(&self, id: TaskId, idx: usize, new_value: i32) {
         self.worker_tx
             .send(Message::UpdateTask {
                 id,
-                index,
+                idx,
                 new_value,
                 result_tx: self.result_tx.clone(),
             })
             .unwrap();
 
-        log!("[Hypervisor] Sent update to task {id}: var[{index}] = {new_value}");
+        log!("[Hypervisor] Sent update to task {id}: var[{idx}] = {new_value}");
     }
 
-    pub fn query_task(&self, id: TaskId) {
-        let (resp_tx, resp_rx) = mpsc::channel();
+    pub fn query_task(&self, id: TaskId, idx: usize) {
         self.worker_tx
             .send(Message::QueryTask {
                 id,
-                response_tx: resp_tx,
+                idx,
                 result_tx: self.result_tx.clone(),
             })
             .unwrap();
-
-        if let Ok(vars) = resp_rx.recv() {
-            log!("[Hypervisor] Query result for task {id}: {:?}", vars);
-        }
-    }
+    
+        log!("[Hypervisor] Sent query to task {id} for var[{idx}]");
+    }    
 
     pub fn listen_for_results(&self) {
         while self.task_counter.load(Ordering::SeqCst) > 0 {
@@ -277,6 +281,18 @@ impl Hypervisor {
                     }
                     TaskResult::NotFound(id, context) => {
                         log!("[Hypervisor] Task {id} not found: {context}");
+                    }
+                    TaskResult::QueryResult(id, Ok(val)) => {
+                        log!("[Hypervisor] Query result for task {id}: {val}");
+                    }
+                    TaskResult::QueryResult(id, Err(bad)) => {
+                        log!("[Hypervisor] Query failed for task {id}: invalid idx {bad}");
+                    }
+                    TaskResult::UpdateResult(id, Ok(())) => {
+                        log!("[Hypervisor] Updated successfully for task {id}");
+                    }
+                    TaskResult::UpdateResult(id, Err(bad)) => {
+                        log!("[Hypervisor] Update failed for task {id}: invalid idx {bad}");
                     }
                 }
             }
