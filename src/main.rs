@@ -3,6 +3,8 @@ use std::sync::{mpsc, Arc, Mutex, atomic::Ordering, atomic::AtomicUsize};
 use std::thread;
 use std::time::Duration;
 
+const MAX_CONCURRENT_TASKS: usize = 4;
+
 type TaskId = usize;
 
 #[derive(Debug)]
@@ -115,19 +117,24 @@ fn task_loop(mut task: Task, rx: mpsc::Receiver<TaskControl>, result_tx: mpsc::S
 }
 
 
-fn start_worker(rx: mpsc::Receiver<Message>) {
+fn start_worker(rx: mpsc::Receiver<Message>, task_counter: Arc<AtomicUsize>) {
     let task_map = Arc::new(Mutex::new(HashMap::new()));
 
     thread::spawn(move || {
         for msg in rx {
             match msg {
                 Message::CreateTask { id, script, variables, result_tx } => {
+                    task_counter.fetch_add(1, Ordering::SeqCst);
+
                     let task = parse_script(id, &script, variables);
                     let (task_tx, task_rx) = mpsc::channel();
                     task_map.lock().unwrap().insert(id, task_tx);
 
+                    let tc = Arc::clone(&task_counter);
+
                     thread::spawn(move || {
                         task_loop(task, task_rx, result_tx);
+                        tc.fetch_sub(1, Ordering::SeqCst);
                     });
 
                     println!("[Worker] Task {id} created");
@@ -161,7 +168,7 @@ impl Hypervisor {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let task_counter = Arc::new(AtomicUsize::new(0));
-        start_worker(worker_rx);
+        start_worker(worker_rx, Arc::clone(&task_counter));
         Self {
             worker_tx,
             result_tx,
@@ -174,7 +181,6 @@ impl Hypervisor {
 
 impl Hypervisor {
     fn create_task(&self, id: TaskId, script: &str, vars: Vec<i32>) {
-        self.task_counter.fetch_add(1, Ordering::SeqCst);
         self.worker_tx.send(Message::CreateTask {
             id,
             script: script.to_string(),
@@ -212,7 +218,6 @@ impl Hypervisor {
         while self.task_counter.load(Ordering::SeqCst) > 0 {
             if let Ok((id, vars)) = self.result_rx.recv() {
                 println!("[Hypervisor] Task {id} completed with variables: {:?}", vars);
-                self.task_counter.fetch_sub(1, Ordering::SeqCst);
             }
         }
     
