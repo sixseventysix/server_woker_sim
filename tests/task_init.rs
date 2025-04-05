@@ -1,4 +1,4 @@
-use server_woker_sim::{task_init, ProcessStep};
+use server_worker_sim::{task_init, ProcessStep};
 use std::collections::VecDeque;
 
 #[test]
