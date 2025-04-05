@@ -1,5 +1,5 @@
 [package]
-name = "server_woker_sim"
+name = "server_worker_sim"
 version = "0.1.0"
 edition = "2021"
 

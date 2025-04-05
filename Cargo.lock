@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "server_woker_sim"
+name = "server_worker_sim"
 version = "0.1.0"
