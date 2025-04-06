@@ -59,6 +59,141 @@ pub enum TaskControl {
     },
 }
 
+pub struct Worker {
+    task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskControl>>>>,
+    active_tasks: Arc<AtomicUsize>,
+}
+
+impl Worker {
+    pub fn new(rx: Receiver<Message>) -> Self {
+        let worker = Self {
+            task_map: Arc::new(Mutex::new(HashMap::new())),
+            active_tasks: Arc::new(AtomicUsize::new(0)),
+        };
+
+        worker.start(rx);
+        worker
+    }
+
+    pub fn start(&self, rx: Receiver<Message>) {
+        let task_map = Arc::clone(&self.task_map);
+        let active_tasks = Arc::clone(&self.active_tasks);
+
+        thread::spawn(move || {
+            for msg in rx {
+                match msg {
+                    Message::CreateTask {
+                        req_id,
+                        id,
+                        query_map,
+                        update_map,
+                        result_tx,
+                    } => {
+                        if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
+                            println!("[req:{req_id}] [Worker] Task {id} rejected due to throttling");
+                            let _ = result_tx.send(TaskResult::Throttled { req_id, id });
+                            continue;
+                        }
+    
+                        let (task_tx, task_rx) = mpsc::channel();
+                        let task = Task { id, query_map, update_map };
+    
+                        task_map.lock().unwrap().insert(id, task_tx.clone());
+                        active_tasks.fetch_add(1, Ordering::SeqCst);
+    
+                        println!("[req:{req_id}] [Worker] Initializing task thread for Task {id}");
+                        let task_map_cloned = Arc::clone(&task_map);
+                        let active_tasks_cloned = Arc::clone(&active_tasks);
+                        let task_thread = TaskThread {
+                            task,
+                            rx: task_rx,
+                        };
+
+                        thread::spawn(move || {
+                            task_thread.run();
+                            task_map_cloned.lock().unwrap().remove(&id);
+                            active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
+                            println!("[Worker] Task {id} finished and removed.");
+                        });
+                    }
+    
+                    Message::QueryTask { req_id, id, query_id, result_tx } => {
+                        if let Some(tx) = task_map.lock().unwrap().get(&id) {
+                            tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
+                        } else {
+                            let _ = result_tx.send(TaskResult::NotFound {
+                                req_id,
+                                id,
+                                ctx: "Task not found for query",
+                            });
+                        }
+                    }
+    
+                    Message::UpdateTask { req_id, id, update_id, result_tx } => {
+                        if let Some(tx) = task_map.lock().unwrap().get(&id) {
+                            tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
+                        } else {
+                            let _ = result_tx.send(TaskResult::NotFound {
+                                req_id,
+                                id,
+                                ctx: "Task not found for update",
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+pub struct TaskThread {
+    pub task: Task,
+    pub rx: Receiver<TaskControl>,
+}
+
+impl TaskThread {
+    pub fn run(mut self) {
+        while let Ok(msg) = self.rx.recv() {
+            println!("[Task {}] Received control message: {:?}", self.task.id, msg);
+            match msg {
+                TaskControl::Query { req_id, query_id, result_tx } => {
+                    match self.task.query_map.get(&query_id) {
+                        Some(value) => {
+                            let _ = result_tx.send(TaskResult::QueryOk {
+                                req_id,
+                                id: self.task.id,
+                                value: value.clone(),
+                            });
+                        }
+                        None => {
+                            let _ = result_tx.send(TaskResult::QueryError {
+                                req_id,
+                                id: self.task.id,
+                                msg: format!("Query ID '{}' not found", query_id),
+                            });
+                        }
+                    }
+                }
+                TaskControl::Update { req_id, update_id, result_tx } => {
+                    if let Some(update_fn) = self.task.update_map.get_mut(&update_id) {
+                        update_fn();
+                        let _ = result_tx.send(TaskResult::UpdateOk {
+                            req_id,
+                            id: self.task.id,
+                        });
+                    } else {
+                        let _ = result_tx.send(TaskResult::UpdateError {
+                            req_id,
+                            id: self.task.id,
+                            msg: format!("Update ID '{update_id}' not found"),
+                        });
+                    }                
+                }
+            }
+        }
+    }
+}
+
 pub struct Hypervisor {
     pub worker_tx: Sender<Message>,
     pub result_tx: mpsc::Sender<TaskResult>,
@@ -71,7 +206,7 @@ impl Hypervisor {
     pub fn new() -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        start_worker(worker_rx);
+        let worker = Worker::new(worker_rx);
 
         let listener_handle = thread::spawn(move || {
             while let Ok(result) = result_rx.recv() {
@@ -159,116 +294,7 @@ impl Hypervisor {
             })
             .unwrap();
     }
-}
 
-fn start_worker(rx: Receiver<Message>) {
-    let task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskControl>>>> = Arc::new(Mutex::new(HashMap::new()));
-    let active_tasks = Arc::new(AtomicUsize::new(0));
-
-    thread::spawn(move || {
-        for msg in rx {
-            match msg {
-                Message::CreateTask {
-                    req_id,
-                    id,
-                    query_map,
-                    update_map,
-                    result_tx,
-                } => {
-                    if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
-                        println!("[req:{req_id}] [Worker] Task {id} rejected due to throttling");
-                        let _ = result_tx.send(TaskResult::Throttled { req_id, id });
-                        continue;
-                    }
-
-                    let (task_tx, task_rx) = mpsc::channel();
-                    let task = Task { id, query_map, update_map };
-
-                    task_map.lock().unwrap().insert(id, task_tx.clone());
-                    active_tasks.fetch_add(1, Ordering::SeqCst);
-
-                    println!("[req:{req_id}] [Worker] Initializing task thread for Task {id}");
-                    let task_map_cloned = Arc::clone(&task_map);
-                    let active_tasks_cloned = Arc::clone(&active_tasks);
-
-                    thread::spawn(move || {
-                        task_loop(task, task_rx);
-                        task_map_cloned.lock().unwrap().remove(&id);
-                        active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
-                        println!("[Worker] Task {id} finished and removed.");
-                    });
-                }
-
-                Message::QueryTask { req_id, id, query_id, result_tx } => {
-                    if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
-                    } else {
-                        let _ = result_tx.send(TaskResult::NotFound {
-                            req_id,
-                            id,
-                            ctx: "Task not found for query",
-                        });
-                    }
-                }
-
-                Message::UpdateTask { req_id, id, update_id, result_tx } => {
-                    if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
-                    } else {
-                        let _ = result_tx.send(TaskResult::NotFound {
-                            req_id,
-                            id,
-                            ctx: "Task not found for update",
-                        });
-                    }
-                }
-            }
-        }
-    });
-}
-
-fn task_loop(mut task: Task, rx: mpsc::Receiver<TaskControl>) {
-    while let Ok(msg) = rx.recv() {
-        println!("[Task {}] Received control message: {:?}", task.id, msg);
-        match msg {
-            TaskControl::Query { req_id, query_id, result_tx } => {
-                match task.query_map.get(&query_id) {
-                    Some(value) => {
-                        let _ = result_tx.send(TaskResult::QueryOk {
-                            req_id,
-                            id: task.id,
-                            value: value.clone(),
-                        });
-                    }
-                    None => {
-                        let _ = result_tx.send(TaskResult::QueryError {
-                            req_id,
-                            id: task.id,
-                            msg: format!("Query ID '{}' not found", query_id),
-                        });
-                    }
-                }
-            }
-            TaskControl::Update { req_id, update_id, result_tx } => {
-                if let Some(update_fn) = task.update_map.get_mut(&update_id) {
-                    update_fn();
-                    let _ = result_tx.send(TaskResult::UpdateOk {
-                        req_id,
-                        id: task.id,
-                    });
-                } else {
-                    let _ = result_tx.send(TaskResult::UpdateError {
-                        req_id,
-                        id: task.id,
-                        msg: format!("Update ID '{update_id}' not found"),
-                    });
-                }                
-            }
-        }
-    }
-}
-
-impl Hypervisor {
     pub fn join_listener(self) {
         if let Some(handle) = self.listener_handle {
             let _ = handle.join();
