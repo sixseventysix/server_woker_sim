@@ -25,18 +25,21 @@ pub enum ProcessStep {
 #[derive(Debug)]
 enum Message {
     CreateTask {
+        req_id: usize,
         id: TaskId,
         script: String,
         variables: Vec<i32>,
         result_tx: mpsc::Sender<TaskResult>,
     },
     UpdateTask {
+        req_id: usize,
         id: TaskId,
         idx: usize,
         new_value: i32,
         result_tx: mpsc::Sender<TaskResult>,
     },
     QueryTask {
+        req_id: usize,
         id: TaskId,
         idx: usize,
         result_tx: mpsc::Sender<TaskResult>,
@@ -45,8 +48,17 @@ enum Message {
 
 #[derive(Debug)]
 enum TaskControl {
-    UpdateVar { idx: usize, new_value: i32, result_tx: mpsc::Sender<TaskResult> },
-    QueryVar { idx: usize, result_tx: mpsc::Sender<TaskResult> },
+    UpdateVar { 
+        req_id: usize, 
+        idx: usize, 
+        new_value: i32, 
+        result_tx: mpsc::Sender<TaskResult> 
+    },
+    QueryVar { 
+        req_id: usize, 
+        idx: usize, 
+        result_tx: mpsc::Sender<TaskResult> 
+    }
 }
 
 #[derive(Debug)]
@@ -58,12 +70,12 @@ pub struct Task {
 
 #[derive(Debug)]
 pub enum TaskResult {
-    Success(TaskId, Vec<i32>),
-    InitError(TaskId, String),
-    Throttled(TaskId),
-    NotFound(TaskId, &'static str),
-    QueryResult(TaskId, Result<i32, usize>),
-    UpdateResult(TaskId, Result<(), usize>),
+    Success { req_id: usize, id: TaskId, variables: Vec<i32> },
+    InitError { req_id: usize, id: TaskId, msg: String },
+    Throttled { req_id: usize, id: TaskId },
+    NotFound { req_id: usize, id: TaskId, ctx: &'static str },
+    QueryResult { req_id: usize, id: TaskId, result: Result<i32, usize> },
+    UpdateResult { req_id: usize, id: TaskId, result: Result<(), usize> },
 }
 
 pub fn task_init(id: TaskId, script: &str, variables: Vec<i32>) -> Result<Task, String> {
@@ -117,19 +129,17 @@ fn execute_next_step(task: &mut Task) -> bool {
     }
 }
 
-fn task_loop(mut task: Task, rx: mpsc::Receiver<TaskControl>, result_tx: mpsc::Sender<TaskResult>) {
+fn task_loop(req_id: usize, mut task: Task, rx: mpsc::Receiver<TaskControl>, result_tx: mpsc::Sender<TaskResult>) {
     loop {
         let has_more = execute_next_step(&mut task);
 
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                TaskControl::QueryVar { idx, result_tx } => {
-                    let result = task.variables.get(idx)
-                        .cloned()
-                        .ok_or(idx);
-                    let _ = result_tx.send(TaskResult::QueryResult(task.id, result));
+                TaskControl::QueryVar { req_id, idx, result_tx } => {
+                    let result = task.variables.get(idx).cloned().ok_or(idx);
+                    let _ = result_tx.send(TaskResult::QueryResult { req_id, id: task.id, result });
                 }
-                TaskControl::UpdateVar { idx, new_value, result_tx } => {
+                TaskControl::UpdateVar { req_id, idx, new_value, result_tx } => {
                     let result = match task.variables.get_mut(idx) {
                         Some(var) => {
                             *var = new_value;
@@ -137,14 +147,14 @@ fn task_loop(mut task: Task, rx: mpsc::Receiver<TaskControl>, result_tx: mpsc::S
                         }
                         None => Err(idx),
                     };
-                    let _ = result_tx.send(TaskResult::UpdateResult(task.id, result));
+                    let _ = result_tx.send(TaskResult::UpdateResult { req_id, id: task.id, result });
                 }
             }
         }
 
         if !has_more {
             log!("[Task {}] Finished. Final vars: {:?}", task.id, task.variables);
-            let _ = result_tx.send(TaskResult::Success(task.id, task.variables.clone()));
+            let _ = result_tx.send(TaskResult::Success { req_id, id: task.id, variables: task.variables.clone() });
             break;
         }
     }
@@ -156,46 +166,46 @@ fn start_worker(rx: mpsc::Receiver<Message>, task_counter: Arc<AtomicUsize>) {
     thread::spawn(move || {
         for msg in rx {
             match msg {
-                Message::CreateTask { id, script, variables, result_tx } => {
+                Message::CreateTask { req_id, id, script, variables, result_tx } => {
                     if task_counter.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
-                        log!("[Worker] Task {id} rejected due to throttling");
-                        let _ = result_tx.send(TaskResult::Throttled(id));
+                        log!("[req:{req_id}] [Worker] Task {id} rejected due to throttling");
+                        let _ = result_tx.send(TaskResult::Throttled { req_id, id });
                         continue;
                     }
 
                     match task_init(id, &script, variables) {
-                        Ok(task) => { 
+                        Ok(task) => {
                             let (task_tx, task_rx) = mpsc::channel();
                             task_map.lock().unwrap().insert(id, task_tx);
                             let task_map_cloned = Arc::clone(&task_map);
 
                             thread::spawn(move || {
-                                task_loop(task, task_rx, result_tx);
+                                task_loop(req_id, task, task_rx, result_tx);
                                 task_map_cloned.lock().unwrap().remove(&id);
                             });
 
-                            log!("[Worker] Task {id} created");
+                            log!("[req:{req_id}] [Worker] Task {id} created");
                         }
                         Err(msg) => {
-                            log!("[Worker] Task {id} failed to initialize: {msg}");
-                            let _ = result_tx.send(TaskResult::InitError(id, msg));
+                            log!("[req:{req_id}] [Worker] Task {id} failed to initialize: {msg}");
+                            let _ = result_tx.send(TaskResult::InitError { req_id, id, msg });
                         }
                     }
                 }
 
-                Message::UpdateTask { id, idx, new_value, result_tx } => {
+                Message::UpdateTask { req_id, id, idx, new_value, result_tx } => {
                     if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::UpdateVar { idx, new_value, result_tx }).ok();
+                        tx.send(TaskControl::UpdateVar { req_id, idx, new_value, result_tx }).ok();
                     } else {
-                        let _ = result_tx.send(TaskResult::NotFound(id, "Update target not found"));
+                        let _ = result_tx.send(TaskResult::NotFound { req_id, id, ctx: "Update target not found" });
                     }
                 }
 
-                Message::QueryTask { id, idx, result_tx } => {
+                Message::QueryTask { req_id, id, idx, result_tx } => {
                     if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::QueryVar { idx, result_tx }).ok();
+                        tx.send(TaskControl::QueryVar { req_id, idx, result_tx }).ok();
                     } else {
-                        let _ = result_tx.send(TaskResult::NotFound(id, "Query target not found"));
+                        let _ = result_tx.send(TaskResult::NotFound { req_id, id, ctx: "Query target not found" });
                     }
                 }
             }
@@ -208,6 +218,8 @@ pub struct Hypervisor {
     result_tx: mpsc::Sender<TaskResult>,
     result_rx: mpsc::Receiver<TaskResult>,
     task_counter: Arc<AtomicUsize>,
+    task_id_counter: AtomicUsize,
+    request_counter: AtomicUsize,
 }
 
 impl Hypervisor {
@@ -220,28 +232,43 @@ impl Hypervisor {
             worker_tx,
             result_tx,
             result_rx,
-            task_counter
+            task_counter,
+            task_id_counter: AtomicUsize::new(0),
+            request_counter: AtomicUsize::new(0),
         }
     }
 }
 
 impl Hypervisor {
-    pub fn create_task(&self, id: TaskId, script: &str, vars: Vec<i32>) {
+    pub fn next_req_id(&self) -> usize {
+        self.request_counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn next_task_id(&self) -> usize {
+        self.task_id_counter.fetch_add(1, Ordering::SeqCst)
+    }    
+
+    pub fn create_task(&self, script: &str, vars: Vec<i32>) {
+        let req_id = self.next_req_id();
+        let id = self.next_task_id();
         self.task_counter.fetch_add(1, Ordering::SeqCst);
         self.worker_tx.send(Message::CreateTask {
+            req_id,
             id,
             script: script.to_string(),
             variables: vars,
             result_tx: self.result_tx.clone(),
         }).unwrap();
     
-        log!("[Hypervisor] Created task {id}");
+        log!("[req:{req_id}] [Hypervisor] Created task {id}");
     }
     
 
     pub fn update_task(&self, id: TaskId, idx: usize, new_value: i32) {
+        let req_id = self.next_req_id();
         self.worker_tx
             .send(Message::UpdateTask {
+                req_id,
                 id,
                 idx,
                 new_value,
@@ -249,57 +276,70 @@ impl Hypervisor {
             })
             .unwrap();
 
-        log!("[Hypervisor] Sent update to task {id}: var[{idx}] = {new_value}");
+        log!("[req:{req_id}] [Hypervisor] Sent update to task {id}: var[{idx}] = {new_value}");
     }
 
     pub fn query_task(&self, id: TaskId, idx: usize) {
+        let req_id = self.next_req_id();
         self.worker_tx
             .send(Message::QueryTask {
+                req_id,
                 id,
                 idx,
                 result_tx: self.result_tx.clone(),
-            })
+            })        
             .unwrap();
     
-        log!("[Hypervisor] Sent query to task {id} for var[{idx}]");
+        log!("[req:{req_id}] [Hypervisor] Sent query to task {id} for var[{idx}]");
     }    
 
     pub fn listen_for_results(&self) {
         while self.task_counter.load(Ordering::SeqCst) > 0 {
             if let Ok(result) = self.result_rx.recv() {
                 match result {
-                    TaskResult::Success(id, vars) => {
-                        log!("[Hypervisor] Task {id} completed with variables: {:?}", vars);
+                    TaskResult::Success { req_id, id, variables } => {
+                        log!("[req:{req_id}] Task {id} completed with variables: {:?}", variables);
                         self.task_counter.fetch_sub(1, Ordering::SeqCst);
                     }
-                    TaskResult::InitError(id, msg) => {
-                        log!("[Hypervisor] Task {id} failed to initialize: {msg}");
+    
+                    TaskResult::InitError { req_id, id, msg } => {
+                        log!("[req:{req_id}] Task {id} failed to initialize: {msg}");
                         self.task_counter.fetch_sub(1, Ordering::SeqCst);
                     }
-                    TaskResult::Throttled(id) => {
-                        log!("[Hypervisor] Task {id} was throttled");
+    
+                    TaskResult::Throttled { req_id, id } => {
+                        log!("[req:{req_id}] Task {id} was throttled");
+                        self.task_counter.fetch_sub(1, Ordering::SeqCst);
                     }
-                    TaskResult::NotFound(id, context) => {
-                        log!("[Hypervisor] Task {id} not found: {context}");
+    
+                    TaskResult::NotFound { req_id, id, ctx } => {
+                        log!("[req:{req_id}] Task {id} not found: {ctx}");
+                        self.task_counter.fetch_sub(1, Ordering::SeqCst);
                     }
-                    TaskResult::QueryResult(id, Ok(val)) => {
-                        log!("[Hypervisor] Query result for task {id}: {val}");
-                    }
-                    TaskResult::QueryResult(id, Err(bad)) => {
-                        log!("[Hypervisor] Query failed for task {id}: invalid idx {bad}");
-                    }
-                    TaskResult::UpdateResult(id, Ok(())) => {
-                        log!("[Hypervisor] Updated successfully for task {id}");
-                    }
-                    TaskResult::UpdateResult(id, Err(bad)) => {
-                        log!("[Hypervisor] Update failed for task {id}: invalid idx {bad}");
-                    }
+    
+                    TaskResult::QueryResult { req_id, id, result } => match result {
+                        Ok(val) => {
+                            log!("[req:{req_id}] Query result for task {id}: {val}");
+                        }
+                        Err(bad) => {
+                            log!("[req:{req_id}] Query failed for task {id}: invalid idx {bad}");
+                        }
+                    },
+    
+                    TaskResult::UpdateResult { req_id, id, result } => match result {
+                        Ok(()) => {
+                            log!("[req:{req_id}] Updated successfully for task {id}");
+                        }
+                        Err(bad) => {
+                            log!("[req:{req_id}] Update failed for task {id}: invalid idx {bad}");
+                        }
+                    },
                 }
             }
         }
     
         log!("[Hypervisor] All tasks completed. Exiting.");
-    }    
+    }     
     
 }
 
