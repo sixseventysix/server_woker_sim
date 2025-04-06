@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc::{self, Sender, Receiver}};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
+const MAX_CONCURRENT_TASKS: usize = 4;
 
 type TaskId = usize;
 type RequestId = usize;
@@ -19,6 +20,7 @@ pub enum TaskResult {
     UpdateOk { req_id: RequestId, id: TaskId },
     UpdateError { req_id: RequestId, id: TaskId, msg: String },
     NotFound { req_id: RequestId, id: TaskId, ctx: &'static str },
+    Throttled { req_id: RequestId, id: TaskId },
 }
 
 pub enum Message {
@@ -88,6 +90,9 @@ impl Hypervisor {
                     }
                     TaskResult::NotFound { req_id, id, ctx } => {
                         println!("[req:{req_id}] Task {id} not found: {ctx}");
+                    }
+                    TaskResult::Throttled { req_id, id } => {
+                        println!("[req:{req_id}] Creation for task {id} failed: Worker is throttled");
                     }
                 }
             }
@@ -159,7 +164,7 @@ impl Hypervisor {
 fn start_worker(rx: Receiver<Message>) {
     let task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskControl>>>> = Arc::new(Mutex::new(HashMap::new()));
     let active_tasks = Arc::new(AtomicUsize::new(0));
-    
+
     thread::spawn(move || {
         for msg in rx {
             match msg {
@@ -170,33 +175,33 @@ fn start_worker(rx: Receiver<Message>) {
                     update_map,
                     result_tx,
                 } => {
-                    let (task_tx, task_rx) = mpsc::channel();
+                    if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
+                        println!("[req:{req_id}] [Worker] Task {id} rejected due to throttling");
+                        let _ = result_tx.send(TaskResult::Throttled { req_id, id });
+                        continue;
+                    }
 
-                    let task = Task {
-                        id,
-                        query_map,
-                        update_map,
-                    };
+                    let (task_tx, task_rx) = mpsc::channel();
+                    let task = Task { id, query_map, update_map };
 
                     task_map.lock().unwrap().insert(id, task_tx.clone());
+                    active_tasks.fetch_add(1, Ordering::SeqCst);
+
                     println!("[req:{req_id}] [Worker] Initializing task thread for Task {id}");
+                    let task_map_cloned = Arc::clone(&task_map);
+                    let active_tasks_cloned = Arc::clone(&active_tasks);
+
                     thread::spawn(move || {
                         task_loop(task, task_rx);
+                        task_map_cloned.lock().unwrap().remove(&id);
+                        active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
+                        println!("[Worker] Task {id} finished and removed.");
                     });
                 }
 
-                Message::QueryTask {
-                    req_id,
-                    id,
-                    query_id,
-                    result_tx,
-                } => {
+                Message::QueryTask { req_id, id, query_id, result_tx } => {
                     if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::Query {
-                            req_id,
-                            query_id,
-                            result_tx,
-                        }).ok();
+                        tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
                     } else {
                         let _ = result_tx.send(TaskResult::NotFound {
                             req_id,
@@ -206,18 +211,9 @@ fn start_worker(rx: Receiver<Message>) {
                     }
                 }
 
-                Message::UpdateTask {
-                    req_id,
-                    id,
-                    update_id,
-                    result_tx,
-                } => {
+                Message::UpdateTask { req_id, id, update_id, result_tx } => {
                     if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                        tx.send(TaskControl::Update {
-                            req_id,
-                            update_id,
-                            result_tx,
-                        }).ok();
+                        tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
                     } else {
                         let _ = result_tx.send(TaskResult::NotFound {
                             req_id,
