@@ -2,7 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc::{self, Sender, Receiver}};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
 const MAX_CONCURRENT_TASKS: usize = 4;
+const TASK_TIMEOUT: u64 = 2;
+const LISTENER_TIMEOUT: u64 = 5;
 
 type TaskId = usize;
 type RequestId = usize;
@@ -21,6 +25,7 @@ pub enum TaskResult {
     UpdateError { req_id: RequestId, id: TaskId, msg: String },
     NotFound { req_id: RequestId, id: TaskId, ctx: &'static str },
     Throttled { req_id: RequestId, id: TaskId },
+    ReceivedRequest
 }
 
 pub enum Message {
@@ -100,6 +105,8 @@ impl WorkerThread {
     
                         task_map.lock().unwrap().insert(id, task_tx.clone());
                         active_tasks.fetch_add(1, Ordering::SeqCst);
+
+                        let _ = result_tx.send(TaskResult::ReceivedRequest);
     
                         println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
                         let task_map_cloned = Arc::clone(&task_map);
@@ -119,6 +126,7 @@ impl WorkerThread {
     
                     Message::QueryTask { req_id, id, query_id, result_tx } => {
                         if let Some(tx) = task_map.lock().unwrap().get(&id) {
+                            let _ = result_tx.send(TaskResult::ReceivedRequest);
                             tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
                         } else {
                             let _ = result_tx.send(TaskResult::NotFound {
@@ -131,6 +139,7 @@ impl WorkerThread {
     
                     Message::UpdateTask { req_id, id, update_id, result_tx } => {
                         if let Some(tx) = task_map.lock().unwrap().get(&id) {
+                            let _ = result_tx.send(TaskResult::ReceivedRequest);
                             tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
                         } else {
                             let _ = result_tx.send(TaskResult::NotFound {
@@ -152,46 +161,71 @@ pub struct TaskThread {
 }
 
 impl TaskThread {
-    pub fn run(mut self) {
-        while let Ok(msg) = self.rx.recv() {
-            println!("[Task {}] Received control message: {:?}", self.task.id, msg);
-            match msg {
-                TaskControl::Query { req_id, query_id, result_tx } => {
-                    match self.task.query_map.get(&query_id) {
-                        Some(value) => {
-                            let _ = result_tx.send(TaskResult::QueryOk {
-                                req_id,
-                                id: self.task.id,
-                                value: value.clone(),
-                            });
+    fn run(mut self) {
+        let timeout_duration = Duration::from_secs(TASK_TIMEOUT);
+        loop {
+            println!("[Task {}] Waiting for control message...", self.task.id);
+            match self.rx.recv_timeout(timeout_duration) {
+                Ok(msg) => {
+                    println!("[Task {}] Received control message: {:?}", self.task.id, msg);
+                    match msg {
+                        TaskControl::Query { req_id, query_id, result_tx } => {
+                            match self.task.query_map.get(&query_id) {
+                                Some(value) => {
+                                    let _ = result_tx.send(TaskResult::QueryOk {
+                                        req_id,
+                                        id: self.task.id,
+                                        value: value.clone(),
+                                    });
+                                }
+                                None => {
+                                    let _ = result_tx.send(TaskResult::QueryError {
+                                        req_id,
+                                        id: self.task.id,
+                                        msg: format!("Query ID '{}' not found", query_id),
+                                    });
+                                }
+                            }
                         }
-                        None => {
-                            let _ = result_tx.send(TaskResult::QueryError {
-                                req_id,
-                                id: self.task.id,
-                                msg: format!("Query ID '{}' not found", query_id),
-                            });
+                        TaskControl::Update { req_id, update_id, result_tx } => {
+                            if let Some(update_fn) = self.task.update_map.get_mut(&update_id) {
+                                update_fn();
+                                let _ = result_tx.send(TaskResult::UpdateOk {
+                                    req_id,
+                                    id: self.task.id,
+                                });
+                            } else {
+                                let _ = result_tx.send(TaskResult::UpdateError {
+                                    req_id,
+                                    id: self.task.id,
+                                    msg: format!("Update ID '{}' not found", update_id),
+                                });
+                            }
                         }
                     }
                 }
-                TaskControl::Update { req_id, update_id, result_tx } => {
-                    if let Some(update_fn) = self.task.update_map.get_mut(&update_id) {
-                        update_fn();
-                        let _ = result_tx.send(TaskResult::UpdateOk {
-                            req_id,
-                            id: self.task.id,
-                        });
-                    } else {
-                        let _ = result_tx.send(TaskResult::UpdateError {
-                            req_id,
-                            id: self.task.id,
-                            msg: format!("Update ID '{update_id}' not found"),
-                        });
-                    }                
+    
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    println!(
+                        "[Task {}] No control message received for {:?}. Exiting due to inactivity.",
+                        self.task.id, timeout_duration
+                    );
+                    break;
+                }
+    
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    println!(
+                        "[Task {}] Control channel disconnected. Exiting task loop.",
+                        self.task.id
+                    );
+                    break;
                 }
             }
         }
+    
+        println!("[Task {}] Task loop terminated.", self.task.id);
     }
+    
 }
 
 pub struct ServerThread {
@@ -209,7 +243,7 @@ impl ServerThread {
         let worker = WorkerThread::new(worker_rx);
 
         let listener_handle = thread::spawn(move || {
-            while let Ok(result) = result_rx.recv() {
+            while let Ok(result) = result_rx.recv_timeout(Duration::from_secs(LISTENER_TIMEOUT)) {
                 match result {
                     TaskResult::QueryOk { req_id, id, value } => {
                         println!("[req:{req_id}] Query result for task {id}: {value}");
@@ -228,6 +262,9 @@ impl ServerThread {
                     }
                     TaskResult::Throttled { req_id, id } => {
                         println!("[req:{req_id}] Creation for task {id} failed: WorkerThread is throttled");
+                    }
+                    TaskResult::ReceivedRequest => {
+                        println!("[Listener] Received new request. Resetting idle timer.");
                     }
                 }
             }
