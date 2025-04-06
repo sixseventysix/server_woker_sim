@@ -59,12 +59,12 @@ pub enum TaskControl {
     },
 }
 
-pub struct Worker {
+pub struct WorkerThread {
     task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskControl>>>>,
     active_tasks: Arc<AtomicUsize>,
 }
 
-impl Worker {
+impl WorkerThread {
     pub fn new(rx: Receiver<Message>) -> Self {
         let worker = Self {
             task_map: Arc::new(Mutex::new(HashMap::new())),
@@ -90,7 +90,7 @@ impl Worker {
                         result_tx,
                     } => {
                         if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
-                            println!("[req:{req_id}] [Worker] Task {id} rejected due to throttling");
+                            println!("[req:{req_id}] [WorkerThread] Task {id} rejected due to throttling");
                             let _ = result_tx.send(TaskResult::Throttled { req_id, id });
                             continue;
                         }
@@ -101,7 +101,7 @@ impl Worker {
                         task_map.lock().unwrap().insert(id, task_tx.clone());
                         active_tasks.fetch_add(1, Ordering::SeqCst);
     
-                        println!("[req:{req_id}] [Worker] Initializing task thread for Task {id}");
+                        println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
                         let task_map_cloned = Arc::clone(&task_map);
                         let active_tasks_cloned = Arc::clone(&active_tasks);
                         let task_thread = TaskThread {
@@ -113,7 +113,7 @@ impl Worker {
                             task_thread.run();
                             task_map_cloned.lock().unwrap().remove(&id);
                             active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
-                            println!("[Worker] Task {id} finished and removed.");
+                            println!("[WorkerThread] Task {id} finished and removed.");
                         });
                     }
     
@@ -194,7 +194,7 @@ impl TaskThread {
     }
 }
 
-pub struct Hypervisor {
+pub struct ServerThread {
     pub worker_tx: Sender<Message>,
     pub result_tx: mpsc::Sender<TaskResult>,
     pub request_counter: AtomicUsize,
@@ -202,11 +202,11 @@ pub struct Hypervisor {
     pub listener_handle: Option<JoinHandle<()>>,
 }
 
-impl Hypervisor {
+impl ServerThread {
     pub fn new() -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        let worker = Worker::new(worker_rx);
+        let worker = WorkerThread::new(worker_rx);
 
         let listener_handle = thread::spawn(move || {
             while let Ok(result) = result_rx.recv() {
@@ -227,7 +227,7 @@ impl Hypervisor {
                         println!("[req:{req_id}] Task {id} not found: {ctx}");
                     }
                     TaskResult::Throttled { req_id, id } => {
-                        println!("[req:{req_id}] Creation for task {id} failed: Worker is throttled");
+                        println!("[req:{req_id}] Creation for task {id} failed: WorkerThread is throttled");
                     }
                 }
             }
@@ -257,7 +257,7 @@ impl Hypervisor {
     ) -> TaskId {
         let req_id = self.next_req_id();
         let id = self.next_task_id();
-        println!("[req:{req_id}] [Hypervisor] Sending create task to worker for Task {id}");
+        println!("[req:{req_id}] [ServerThread] Sending create task to worker for Task {id}");
         self.worker_tx
             .send(Message::CreateTask {
                 req_id,
