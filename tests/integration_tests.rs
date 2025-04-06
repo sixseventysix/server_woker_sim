@@ -68,3 +68,30 @@ fn test_queried_task_w_throttled_tasks() {
     s.query_task(task_id[2], "get_status");
     s.query_task(task_id[0], "invalid_query");
 }
+
+#[test]
+fn test_complex_task_interactions() {
+    let server = ServerThread::new();
+
+    let mut task_ids = Vec::new();
+    for i in 0..4 {
+        let task_id = server.create_task(
+            [("get_status".into(), format!("idle_{}", i))].into(),
+            [("mark_done".into(), Box::new(move || println!("[Task {i}] Marked done")) as Box<dyn FnMut() + Send>)].into()
+        );
+        task_ids.push(task_id);
+    }
+
+    server.query_task(task_ids[0], "get_status");
+    server.update_task(task_ids[1], "mark_done");
+    server.query_task(task_ids[2], "get_status");
+    server.query_task(task_ids[0], "invalid_query");
+    server.update_task(task_ids[3], "invalid_update");
+    server.query_task(task_ids[0], "get_status");
+    server.update_task(task_ids[1], "mark_done");
+    server.query_task(task_ids[2], "get_status");
+    server.update_task(task_ids[3], "mark_done");
+    server.query_task(task_ids[1], "get_status");
+
+    server.join_listener();
+}

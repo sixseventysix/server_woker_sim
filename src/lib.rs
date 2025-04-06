@@ -3,10 +3,20 @@ use std::sync::{Arc, Mutex, mpsc::{self, Sender, Receiver}};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::sync::atomic::AtomicBool;
 
 const MAX_CONCURRENT_TASKS: usize = 4;
+
+// assumption 1: TASK_TIMEOUT is larger than how long any task would take to execute a request
+// assumption 2: LISTENER_TIMEOUT > TASK_TIMEOUT
+// because after getting a ReceivedRequest, the theoretical upper bound for execution time is TASK_TIMEOUT (from assumption 1)
+// so listener will listen for a minimum of TASK_TIMEOUT so that we don't lose the output of that task by closing
+// the listener thread too hastily
+// this also ensures that TaskThreads are all dropped before the Listener Thread, and the Listener Thread is always dropped
+// before WorkerThread is dropped, so dropping of all channels is graceful and we don't have any dangling variables.
 const TASK_TIMEOUT: u64 = 2;
 const LISTENER_TIMEOUT: u64 = 5;
+const WORKER_TIMEOUT: u64 = 1;
 
 type TaskId = usize;
 type RequestId = usize;
@@ -70,87 +80,88 @@ pub struct WorkerThread {
 }
 
 impl WorkerThread {
-    pub fn new(rx: Receiver<Message>) -> Self {
+    pub fn new(rx: Receiver<Message>, shutdown_flag: Arc<AtomicBool>) -> Self {
         let worker = Self {
             task_map: Arc::new(Mutex::new(HashMap::new())),
             active_tasks: Arc::new(AtomicUsize::new(0)),
         };
 
-        worker.start(rx);
+        worker.start(rx, shutdown_flag);
         worker
     }
 
-    pub fn start(&self, rx: Receiver<Message>) {
+    fn start(&self, rx: Receiver<Message>, shutdown_flag: Arc<AtomicBool>) {
         let task_map = Arc::clone(&self.task_map);
         let active_tasks = Arc::clone(&self.active_tasks);
 
         thread::spawn(move || {
-            for msg in rx {
-                match msg {
-                    Message::CreateTask {
-                        req_id,
-                        id,
-                        query_map,
-                        update_map,
-                        result_tx,
-                    } => {
-                        if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
-                            println!("[req:{req_id}] [WorkerThread] Task {id} rejected due to throttling");
-                            let _ = result_tx.send(TaskResult::Throttled { req_id, id });
-                            continue;
-                        }
-    
-                        let (task_tx, task_rx) = mpsc::channel();
-                        let task = Task { id, query_map, update_map };
-    
-                        task_map.lock().unwrap().insert(id, task_tx.clone());
-                        active_tasks.fetch_add(1, Ordering::SeqCst);
+            while !shutdown_flag.load(Ordering::SeqCst) {
+                match rx.recv_timeout(Duration::from_secs(WORKER_TIMEOUT)) {
+                    Ok(msg) => match msg {
+                        Message::CreateTask {
+                            req_id,
+                            id,
+                            query_map,
+                            update_map,
+                            result_tx,
+                        } => {
+                            if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
+                                println!("[req:{req_id}] [WorkerThread] Task {id} rejected due to throttling");
+                                let _ = result_tx.send(TaskResult::Throttled { req_id, id });
+                                continue;
+                            }
 
-                        let _ = result_tx.send(TaskResult::ReceivedRequest);
-    
-                        println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
-                        let task_map_cloned = Arc::clone(&task_map);
-                        let active_tasks_cloned = Arc::clone(&active_tasks);
-                        let task_thread = TaskThread {
-                            task,
-                            rx: task_rx,
-                        };
+                            let (task_tx, task_rx) = std::sync::mpsc::channel();
+                            let task = Task { id, query_map, update_map };
+                            task_map.lock().unwrap().insert(id, task_tx.clone());
+                            active_tasks.fetch_add(1, Ordering::SeqCst);
 
-                        thread::spawn(move || {
-                            task_thread.run();
-                            task_map_cloned.lock().unwrap().remove(&id);
-                            active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
-                            println!("[WorkerThread] Task {id} finished and removed.");
-                        });
-                    }
-    
-                    Message::QueryTask { req_id, id, query_id, result_tx } => {
-                        if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                            let _ = result_tx.send(TaskResult::ReceivedRequest);
-                            tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
-                        } else {
-                            let _ = result_tx.send(TaskResult::NotFound {
-                                req_id,
-                                id,
-                                ctx: "Task not found for query",
+                            println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
+
+                            let task_map_cloned = Arc::clone(&task_map);
+                            let active_tasks_cloned = Arc::clone(&active_tasks);
+                            let task_thread = TaskThread { task, rx: task_rx };
+
+                            thread::spawn(move || {
+                                task_thread.run();
+                                task_map_cloned.lock().unwrap().remove(&id);
+                                active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
+                                println!("[WorkerThread] Task {id} finished and removed.");
                             });
                         }
-                    }
-    
-                    Message::UpdateTask { req_id, id, update_id, result_tx } => {
-                        if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                            let _ = result_tx.send(TaskResult::ReceivedRequest);
-                            tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
-                        } else {
-                            let _ = result_tx.send(TaskResult::NotFound {
-                                req_id,
-                                id,
-                                ctx: "Task not found for update",
-                            });
+
+                        Message::QueryTask { req_id, id, query_id, result_tx } => {
+                            if let Some(tx) = task_map.lock().unwrap().get(&id) {
+                                tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
+                            } else {
+                                let _ = result_tx.send(TaskResult::NotFound {
+                                    req_id,
+                                    id,
+                                    ctx: "Task not found for query",
+                                });
+                            }
                         }
+
+                        Message::UpdateTask { req_id, id, update_id, result_tx } => {
+                            if let Some(tx) = task_map.lock().unwrap().get(&id) {
+                                tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
+                            } else {
+                                let _ = result_tx.send(TaskResult::NotFound {
+                                    req_id,
+                                    id,
+                                    ctx: "Task not found for update",
+                                });
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        println!("[WorkerThread] recv_timeout hit, checking shutdown flag again...");
+                        continue;
                     }
                 }
             }
+
+            println!("[WorkerThread] Shutdown flag detected. Worker exiting.");
         });
     }
 }
@@ -240,31 +251,49 @@ impl ServerThread {
     pub fn new() -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        let worker = WorkerThread::new(worker_rx);
+        
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let shutdown_flag_for_listener = Arc::clone(&shutdown_flag);
+        let shutdown_flag_for_worker = Arc::clone(&shutdown_flag);
+        let worker = WorkerThread::new(worker_rx, shutdown_flag_for_worker);
 
         let listener_handle = thread::spawn(move || {
-            while let Ok(result) = result_rx.recv_timeout(Duration::from_secs(LISTENER_TIMEOUT)) {
-                match result {
-                    TaskResult::QueryOk { req_id, id, value } => {
-                        println!("[req:{req_id}] Query result for task {id}: {value}");
+            loop{
+                match result_rx.recv_timeout(Duration::from_secs(LISTENER_TIMEOUT)) {
+                    Ok(result) => {
+                        match result {
+                            TaskResult::QueryOk { req_id, id, value } => {
+                                println!("[req:{req_id}] Query result for task {id}: {value}");
+                            }
+                            TaskResult::QueryError { req_id, id, msg } => {
+                                println!("[req:{req_id}] Query failed for task {id}: {msg}");
+                            }
+                            TaskResult::UpdateOk { req_id, id } => {
+                                println!("[req:{req_id}] Update OK for task {id}");
+                            }
+                            TaskResult::UpdateError { req_id, id, msg } => {
+                                println!("[req:{req_id}] Update failed for task {id}: {msg}");
+                            }
+                            TaskResult::NotFound { req_id, id, ctx } => {
+                                println!("[req:{req_id}] Task {id} not found: {ctx}");
+                            }
+                            TaskResult::Throttled { req_id, id } => {
+                                println!("[req:{req_id}] Creation for task {id} failed: WorkerThread is throttled");
+                            }
+                            TaskResult::ReceivedRequest => {
+                                println!("[Listener] Received new request. Resetting idle timer.");
+                            }
+                        }
                     }
-                    TaskResult::QueryError { req_id, id, msg } => {
-                        println!("[req:{req_id}] Query failed for task {id}: {msg}");
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        println!("[Listener] No activity. Shutting down...");
+                        shutdown_flag_for_listener.store(true, Ordering::SeqCst);
+                        break;
                     }
-                    TaskResult::UpdateOk { req_id, id } => {
-                        println!("[req:{req_id}] Update OK for task {id}");
-                    }
-                    TaskResult::UpdateError { req_id, id, msg } => {
-                        println!("[req:{req_id}] Update failed for task {id}: {msg}");
-                    }
-                    TaskResult::NotFound { req_id, id, ctx } => {
-                        println!("[req:{req_id}] Task {id} not found: {ctx}");
-                    }
-                    TaskResult::Throttled { req_id, id } => {
-                        println!("[req:{req_id}] Creation for task {id} failed: WorkerThread is throttled");
-                    }
-                    TaskResult::ReceivedRequest => {
-                        println!("[Listener] Received new request. Resetting idle timer.");
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        println!("[Listener] Channel disconnected. Shutting down...");
+                        shutdown_flag_for_listener.store(true, Ordering::SeqCst);
+                        break;
                     }
                 }
             }
