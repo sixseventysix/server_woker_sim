@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 use std::io::{self, Write};
 
-const MAX_CONCURRENT_TASKS: usize = 4;
+pub const MAX_CONCURRENT_TASKS: usize = 4;
 type TaskId = usize;
 
 #[macro_export]
@@ -175,13 +175,15 @@ fn start_worker(rx: mpsc::Receiver<Message>, task_counter: Arc<AtomicUsize>) {
 
                     match task_init(id, &script, variables) {
                         Ok(task) => {
+                            task_counter.fetch_add(1, Ordering::SeqCst);
                             let (task_tx, task_rx) = mpsc::channel();
                             task_map.lock().unwrap().insert(id, task_tx);
                             let task_map_cloned = Arc::clone(&task_map);
-
+                            let task_counter_cloned = Arc::clone(&task_counter);
                             thread::spawn(move || {
                                 task_loop(req_id, task, task_rx, result_tx);
                                 task_map_cloned.lock().unwrap().remove(&id);
+                                task_counter_cloned.fetch_sub(1, Ordering::SeqCst);
                             });
 
                             log!("[req:{req_id}] [Worker] Task {id} created");
@@ -251,7 +253,6 @@ impl Hypervisor {
     pub fn create_task(&self, script: &str, vars: Vec<i32>) {
         let req_id = self.next_req_id();
         let id = self.next_task_id();
-        self.task_counter.fetch_add(1, Ordering::SeqCst);
         self.worker_tx.send(Message::CreateTask {
             req_id,
             id,
@@ -294,44 +295,42 @@ impl Hypervisor {
     }    
 
     pub fn listen_for_results(&self) {
+        std::thread::sleep(std::time::Duration::from_secs(1)); // let tasks initialize
+
         while self.task_counter.load(Ordering::SeqCst) > 0 {
             if let Ok(result) = self.result_rx.recv() {
                 match result {
                     TaskResult::Success { req_id, id, variables } => {
-                        log!("[req:{req_id}] Task {id} completed with variables: {:?}", variables);
-                        self.task_counter.fetch_sub(1, Ordering::SeqCst);
+                        log!("[req:{req_id}] [Hypervisor] Task {id} completed with variables: {:?}", variables);
                     }
     
                     TaskResult::InitError { req_id, id, msg } => {
-                        log!("[req:{req_id}] Task {id} failed to initialize: {msg}");
-                        self.task_counter.fetch_sub(1, Ordering::SeqCst);
+                        log!("[req:{req_id}] [Hypervisor] Task {id} failed to initialize: {msg}");
                     }
     
                     TaskResult::Throttled { req_id, id } => {
-                        log!("[req:{req_id}] Task {id} was throttled");
-                        self.task_counter.fetch_sub(1, Ordering::SeqCst);
+                        log!("[req:{req_id}] [Hypervisor] Task {id} was throttled");
                     }
     
                     TaskResult::NotFound { req_id, id, ctx } => {
-                        log!("[req:{req_id}] Task {id} not found: {ctx}");
-                        self.task_counter.fetch_sub(1, Ordering::SeqCst);
+                        log!("[req:{req_id}] [Hypervisor] Task {id} not found: {ctx}");
                     }
     
                     TaskResult::QueryResult { req_id, id, result } => match result {
                         Ok(val) => {
-                            log!("[req:{req_id}] Query result for task {id}: {val}");
+                            log!("[req:{req_id}] [Hypervisor] Query result for task {id}: {val}");
                         }
                         Err(bad) => {
-                            log!("[req:{req_id}] Query failed for task {id}: invalid idx {bad}");
+                            log!("[req:{req_id}] [Hypervisor] Query failed for task {id}: invalid idx {bad}");
                         }
                     },
     
                     TaskResult::UpdateResult { req_id, id, result } => match result {
                         Ok(()) => {
-                            log!("[req:{req_id}] Updated successfully for task {id}");
+                            log!("[req:{req_id}] [Hypervisor] Updated successfully for task {id}");
                         }
                         Err(bad) => {
-                            log!("[req:{req_id}] Update failed for task {id}: invalid idx {bad}");
+                            log!("[req:{req_id}] [Hypervisor] Update failed for task {id}: invalid idx {bad}");
                         }
                     },
                 }
