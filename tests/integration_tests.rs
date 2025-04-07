@@ -84,7 +84,7 @@ fn test_update_nonexistent_task() {
 #[test]
 fn test_task_throttling_behavior() {
     let s = ServerThread::new();
-    for i in 0..6 {
+    for _i in 0..6 {
         s.create_task(
             [("get_status".into(), "idle".into())].into(),
             [("mark_done".into(), Box::new(|| "Done".to_string()) as Box<dyn FnMut() -> String + Send>)].into()

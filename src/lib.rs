@@ -247,6 +247,13 @@ impl WorkerThread {
 
                     TaskRequest::UpdateTask { req_id, id, update_id, result_tx } => {
                         // get specific task
+
+                        // this unwrap will trigger if mutex lock is poisoned.
+                        // but if mutex is poisoned the task_map is lost.
+                        // it will be poisoned when a task thread panics.
+                        // if it panics after removal from task_map, we are good. but otherwise no.
+                        // currently no code exists in TaskThread that can panic so no impl against poisoned locks has been written
+                        // if it panics, its fine. the task_map was in a dangerous state anyway
                         if let Some(tx) = task_map.lock().unwrap().get(&id) {
                             // send subset of the TaskRequest onto the specified task
                             tx.send(TaskInstruction::Update { req_id, update_id, result_tx }).ok();

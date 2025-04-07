@@ -13,66 +13,66 @@ running 10 tests
 test test_complex_task_interactions ... [req:0] [ServerThread] Sending create task to worker for Task 0
 [req:1] [ServerThread] Sending create task to worker for Task 1
 [req:2] [ServerThread] Sending create task to worker for Task 2
-[req:0] [WorkerThread] Initializing task thread for Task 0
 [req:3] [ServerThread] Sending create task to worker for Task 3
-[req:1] [WorkerThread] Initializing task thread for Task 1
-[Task 0] Waiting for instruction...
-[Task 1] Waiting for instruction...
 [req:4] [ServerThread] Query task 0 sent to worker.
 [req:6] [ServerThread] Query task 2 sent to worker.
 [req:7] [ServerThread] Query task 0 sent to worker.
 [req:9] [ServerThread] Query task 0 sent to worker.
 [req:11] [ServerThread] Query task 2 sent to worker.
 [req:13] [ServerThread] Query task 1 sent to worker.
+[req:0] [WorkerThread] Initializing task thread for Task 0
+[req:1] [WorkerThread] Initializing task thread for Task 1
+[Task 0] Waiting for instruction...
 [req:2] [WorkerThread] Initializing task thread for Task 2
+[Task 1] Waiting for instruction...
 [req:3] [WorkerThread] Initializing task thread for Task 3
 [Task 2] Waiting for instruction...
 [Task 3] Waiting for instruction...
 [Task 3] Received instruction: Update { req_id: 8, update_id: "invalid_update", result_tx: Sender { .. } }
+[Task 2] Received instruction: Query { req_id: 6, query_id: "get_status", result_tx: Sender { .. } }
+[req:8] Update failed for task 3: Update ID 'invalid_update' not found
 [Task 0] Received instruction: Query { req_id: 4, query_id: "get_status", result_tx: Sender { .. } }
-[Task 3] Waiting for instruction...
+[Task 0] Waiting for instruction...
+[Task 0] Received instruction: Query { req_id: 7, query_id: "invalid_query", result_tx: Sender { .. } }
+[Task 0] Waiting for instruction...
+[Task 0] Received instruction: Query { req_id: 9, query_id: "get_status", result_tx: Sender { .. } }
+[Task 0] Waiting for instruction...
 [Task 1] Received instruction: Update { req_id: 5, update_id: "mark_done", result_tx: Sender { .. } }
 [Task 1] Running update function
 [Task 1] Waiting for instruction...
 [Task 1] Received instruction: Update { req_id: 10, update_id: "mark_done", result_tx: Sender { .. } }
-[Task 1] Running update function
+[Task 3] Waiting for instruction...
 [Task 3] Received instruction: Update { req_id: 12, update_id: "mark_done", result_tx: Sender { .. } }
 [Task 3] Running update function
 [Task 3] Waiting for instruction...
-[Task 1] Waiting for instruction...
-[Task 1] Received instruction: Query { req_id: 13, query_id: "get_status", result_tx: Sender { .. } }
-[Task 1] Waiting for instruction...
-[Task 0] Waiting for instruction...
-[Task 0] Received instruction: Query { req_id: 7, query_id: "invalid_query", result_tx: Sender { .. } }
-[Task 0] Waiting for instruction...
-[req:8] Update failed for task 3: Update ID 'invalid_update' not found
-[req:4] Query result for task 0: idle_0
-[req:5] Update result for task 1: done
-[req:10] Update result for task 1: done
-[req:12] Update result for task 3: done
-[req:13] Query result for task 1: idle_1
-[req:7] Query failed for task 0: Query ID 'invalid_query' not found
-[Task 2] Received instruction: Query { req_id: 6, query_id: "get_status", result_tx: Sender { .. } }
-[Task 0] Received instruction: Query { req_id: 9, query_id: "get_status", result_tx: Sender { .. } }
-[Task 0] Waiting for instruction...
 [req:6] Query result for task 2: idle_2
+[req:4] Query result for task 0: idle_0
+[req:7] Query failed for task 0: Query ID 'invalid_query' not found
 [req:9] Query result for task 0: idle_0
+[Task 1] Running update function
+[Task 1] Waiting for instruction...
+[req:5] Update result for task 1: done
+[req:12] Update result for task 3: done
+[req:10] Update result for task 1: done
 [Task 2] Waiting for instruction...
 [Task 2] Received instruction: Query { req_id: 11, query_id: "get_status", result_tx: Sender { .. } }
-[Task 2] Waiting for instruction...
+[Task 1] Received instruction: Query { req_id: 13, query_id: "get_status", result_tx: Sender { .. } }
+[Task 1] Waiting for instruction...
 [req:11] Query result for task 2: idle_2
-[Task 1] No instruction received for 2s. Exiting due to inactivity.
-[Task 1] Task loop terminated.
-[Task 2] No instruction received for 2s. Exiting due to inactivity.
-[Task 2] Task loop terminated.
-[WorkerThread] Task 2 finished and removed.
-[WorkerThread] Task 1 finished and removed.
-[Task 0] No instruction received for 2s. Exiting due to inactivity.
-[Task 0] Task loop terminated.
-[WorkerThread] Task 0 finished and removed.
+[req:13] Query result for task 1: idle_1
+[Task 2] Waiting for instruction...
 [Task 3] No instruction received for 2s. Exiting due to inactivity.
 [Task 3] Task loop terminated.
 [WorkerThread] Task 3 finished and removed.
+[Task 0] No instruction received for 2s. Exiting due to inactivity.
+[Task 0] Task loop terminated.
+[Task 1] No instruction received for 2s. Exiting due to inactivity.
+[Task 1] Task loop terminated.
+[WorkerThread] Task 0 finished and removed.
+[WorkerThread] Task 1 finished and removed.
+[Task 2] No instruction received for 2s. Exiting due to inactivity.
+[Task 2] Task loop terminated.
+[WorkerThread] Task 2 finished and removed.
 [Listener] No activity. Shutting down...
 [WorkerThread] timed out waiting on channel
 [WorkerThread] Shutdown flag detected. Worker exiting.
@@ -84,45 +84,45 @@ test test_queried_task_w_throttled_tasks ... [req:0] [ServerThread] Sending crea
 [req:3] [ServerThread] Sending create task to worker for Task 3
 [req:1] [WorkerThread] Initializing task thread for Task 1
 [Task 0] Waiting for instruction...
+[req:2] [WorkerThread] Initializing task thread for Task 2
 [req:4] [ServerThread] Sending create task to worker for Task 4
-[Task 1] Waiting for instruction...
+[req:3] [WorkerThread] Initializing task thread for Task 3
 [req:5] [ServerThread] Sending create task to worker for Task 5
 [req:6] [ServerThread] Query task 0 sent to worker.
 [req:8] [ServerThread] Query task 2 sent to worker.
 [req:9] [ServerThread] Query task 0 sent to worker.
-[req:2] [WorkerThread] Initializing task thread for Task 2
-[req:3] [WorkerThread] Initializing task thread for Task 3
-[Task 2] Waiting for instruction...
 [req:4] [WorkerThread] Task 4 rejected due to throttling
-[Task 3] Waiting for instruction...
-[req:5] [WorkerThread] Task 5 rejected due to throttling
-[req:4] Creation for task 4 failed: WorkerThread is throttled
-[req:5] Creation for task 5 failed: WorkerThread is throttled
-[Task 2] Received instruction: Query { req_id: 8, query_id: "get_status", result_tx: Sender { .. } }
-[Task 2] Waiting for instruction...
-[req:8] Query result for task 2: idle
-[Task 1] Received instruction: Update { req_id: 7, update_id: "mark_done", result_tx: Sender { .. } }
-[Task 1] Running update function
-[Task 0] Received instruction: Query { req_id: 6, query_id: "get_status", result_tx: Sender { .. } }
 [Task 1] Waiting for instruction...
+[req:5] [WorkerThread] Task 5 rejected due to throttling
+[Task 2] Waiting for instruction...
+[Task 0] Received instruction: Query { req_id: 6, query_id: "get_status", result_tx: Sender { .. } }
 [Task 0] Waiting for instruction...
 [Task 0] Received instruction: Query { req_id: 9, query_id: "invalid_query", result_tx: Sender { .. } }
+[req:4] Creation for task 4 failed: WorkerThread is throttled
+[req:5] Creation for task 5 failed: WorkerThread is throttled
+[Task 1] Received instruction: Update { req_id: 7, update_id: "mark_done", result_tx: Sender { .. } }
+[Task 1] Running update function
 [Task 0] Waiting for instruction...
-[req:7] Update result for task 1: done
+[Task 2] Received instruction: Query { req_id: 8, query_id: "get_status", result_tx: Sender { .. } }
+[Task 2] Waiting for instruction...
+[Task 1] Waiting for instruction...
 [req:6] Query result for task 0: idle
 [req:9] Query failed for task 0: Query ID 'invalid_query' not found
-[Task 3] No instruction received for 2s. Exiting due to inactivity.
-[Task 3] Task loop terminated.
-[WorkerThread] Task 3 finished and removed.
-[Task 1] No instruction received for 2s. Exiting due to inactivity.
-[Task 1] Task loop terminated.
-[WorkerThread] Task 1 finished and removed.
-[Task 2] No instruction received for 2s. Exiting due to inactivity.
-[Task 2] Task loop terminated.
-[WorkerThread] Task 2 finished and removed.
+[Task 3] Waiting for instruction...
+[req:7] Update result for task 1: done
+[req:8] Query result for task 2: idle
 [Task 0] No instruction received for 2s. Exiting due to inactivity.
 [Task 0] Task loop terminated.
+[Task 3] No instruction received for 2s. Exiting due to inactivity.
+[Task 3] Task loop terminated.
 [WorkerThread] Task 0 finished and removed.
+[WorkerThread] Task 3 finished and removed.
+[Task 2] No instruction received for 2s. Exiting due to inactivity.
+[Task 2] Task loop terminated.
+[Task 1] No instruction received for 2s. Exiting due to inactivity.
+[Task 1] Task loop terminated.
+[WorkerThread] Task 2 finished and removed.
+[WorkerThread] Task 1 finished and removed.
 [WorkerThread] timed out waiting on channel
 [Listener] No activity. Shutting down...
 [WorkerThread] Shutdown flag detected. Worker exiting.
@@ -144,24 +144,28 @@ test test_query_after_worker_dropped ... [req:0] [ServerThread] Sending create t
 [Task 0] No instruction received for 2s. Exiting due to inactivity.
 [Task 0] Task loop terminated.
 [WorkerThread] Task 0 finished and removed.
-[Listener] No activity. Shutting down...
 [WorkerThread] timed out waiting on channel
+[Listener] No activity. Shutting down...
+[req:1] [ServerThread] Query task 0 sent to worker.
 [WorkerThread] Shutdown flag detected. Worker exiting.
-[req:1] [ServerThread] Failed to send query task 0 to worker: SendError { .. }
 ok
 test test_query_missing_key_in_task ... [req:0] [ServerThread] Sending create task to worker for Task 0
 [req:1] [ServerThread] Query task 0 sent to worker.
 [req:0] [WorkerThread] Initializing task thread for Task 0
 ok
-[Task 0] Waiting for instruction...
-[Task 0] Received instruction: Query { req_id: 1, query_id: "nonexistent_key", result_tx: Sender { .. } }
 test test_query_nonexistent_task ... [Task 0] Waiting for instruction...
+[Task 0] Received instruction: Query { req_id: 1, query_id: "nonexistent_key", result_tx: Sender { .. } }
+[Task 0] Waiting for instruction...
 [req:1] Query failed for task 0: Query ID 'nonexistent_key' not found
 [Listener] Channel disconnected. Shutting down...
+[req:0] Task 999 not found: Task not found for query
 [WorkerThread] Shutdown flag detected. Worker exiting.
 [req:0] [ServerThread] Query task 999 sent to worker.
-[req:0] Task 999 not found: Task not found for query
-[Listener] Channel disconnected. Shutting down...
+[Task 0] No instruction received for 2s. Exiting due to inactivity.
+[Task 0] Task loop terminated.
+[WorkerThread] Task 0 finished and removed.
+[WorkerThread] timed out waiting on channel
+[Listener] No activity. Shutting down...
 [WorkerThread] Shutdown flag detected. Worker exiting.
 ok
 test test_simple_success ... [req:0] [ServerThread] Sending create task to worker for Task 0
@@ -176,40 +180,59 @@ test test_task_throttling_behavior ... [Task 0] Waiting for instruction...
 [WorkerThread] Shutdown flag detected. Worker exiting.
 [req:0] [ServerThread] Sending create task to worker for Task 0
 [req:1] [ServerThread] Sending create task to worker for Task 1
+[req:0] [WorkerThread] Initializing task thread for Task 0
 [req:2] [ServerThread] Sending create task to worker for Task 2
 [req:3] [ServerThread] Sending create task to worker for Task 3
-[req:4] [ServerThread] Sending create task to worker for Task 4
-[req:5] [ServerThread] Sending create task to worker for Task 5
-[req:0] [WorkerThread] Initializing task thread for Task 0
-ok
 [req:1] [WorkerThread] Initializing task thread for Task 1
 [Task 0] Waiting for instruction...
-test test_update_missing_id_in_task ... [Task 1] Waiting for instruction...
 [req:2] [WorkerThread] Initializing task thread for Task 2
-[req:3] [WorkerThread] Initializing task thread for Task 3
+[Task 1] Waiting for instruction...
+[req:4] [ServerThread] Sending create task to worker for Task 4
+[req:5] [ServerThread] Sending create task to worker for Task 5
 [Task 2] Waiting for instruction...
-[req:0] [ServerThread] Sending create task to worker for Task 0
-[Task 3] Waiting for instruction...
+[req:3] [WorkerThread] Initializing task thread for Task 3
 [req:4] [WorkerThread] Task 4 rejected due to throttling
-[req:0] [WorkerThread] Initializing task thread for Task 0
-[req:4] Creation for task 4 failed: WorkerThread is throttled
+[Task 3] Waiting for instruction...
 [req:5] [WorkerThread] Task 5 rejected due to throttling
+[req:4] Creation for task 4 failed: WorkerThread is throttled
+[req:5] Creation for task 5 failed: WorkerThread is throttled
+[Task 0] No instruction received for 2s. Exiting due to inactivity.
+[Task 0] Task loop terminated.
+[WorkerThread] Task 0 finished and removed.
+[Task 0] No instruction received for 2s. Exiting due to inactivity.
+[Task 0] Task loop terminated.
+[WorkerThread] Task 0 finished and removed.
+[Task 1] No instruction received for 2s. Exiting due to inactivity.
+[Task 1] Task loop terminated.
+[Task 3] No instruction received for 2s. Exiting due to inactivity.
+[Task 3] Task loop terminated.
+[WorkerThread] Task 1 finished and removed.
+[Task 2] No instruction received for 2s. Exiting due to inactivity.
+[Task 2] Task loop terminated.
+[WorkerThread] Task 3 finished and removed.
+[WorkerThread] Task 2 finished and removed.
+[Listener] No activity. Shutting down...
+[WorkerThread] Shutdown flag detected. Worker exiting.
+ok
+test test_update_missing_id_in_task ... [req:0] [ServerThread] Sending create task to worker for Task 0
+[req:0] [WorkerThread] Initializing task thread for Task 0
 [Task 0] Waiting for instruction...
 [Task 0] Received instruction: Update { req_id: 1, update_id: "bad_update_id", result_tx: Sender { .. } }
 [Task 0] Waiting for instruction...
 [req:1] Update failed for task 0: Update ID 'bad_update_id' not found
-[Listener] Channel disconnected. Shutting down...
-[WorkerThread] Shutdown flag detected. Worker exiting.
-[req:5] Creation for task 5 failed: WorkerThread is throttled
-[Listener] Channel disconnected. Shutting down...
+[Task 0] No instruction received for 2s. Exiting due to inactivity.
+[Task 0] Task loop terminated.
+[WorkerThread] Task 0 finished and removed.
+[WorkerThread] timed out waiting on channel
+[Listener] No activity. Shutting down...
 [WorkerThread] Shutdown flag detected. Worker exiting.
 ok
 test test_update_nonexistent_task ... [req:0] Task 888 not found: Task not found for update
-[Listener] Channel disconnected. Shutting down...
-ok
+[Listener] No activity. Shutting down...
 [WorkerThread] Shutdown flag detected. Worker exiting.
+ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.02s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.03s
 
 
 running 0 tests
