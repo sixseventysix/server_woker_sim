@@ -4,6 +4,43 @@ use std::time::Duration;
 use std::thread;
 
 #[test]
+fn test_simple_success() {
+    let s = ServerThread::new();
+
+    let mut query_map = HashMap::new();
+    query_map.insert("status".into(), "running".into());
+
+    let update_map = HashMap::new();
+
+    let task_id = s.create_task(query_map, update_map);
+    s.query_task(task_id, "status");
+}
+
+#[test]
+fn test_query_after_completion() {
+    let s = ServerThread::new();
+
+    let mut query_map = HashMap::new();
+    query_map.insert("status".into(), "running".into());
+    let update_map = HashMap::new();
+    let task_id = s.create_task(query_map, update_map);
+    thread::sleep(Duration::from_secs(3)); // make sure time is more than TASK_TIMEOUT and less than LISTENER_TIMEOUT
+    s.query_task(task_id, "status");
+}
+
+#[test]
+fn test_query_after_worker_dropped() {
+    let s = ServerThread::new();
+
+    let mut query_map = HashMap::new();
+    query_map.insert("status".into(), "running".into());
+    let update_map = HashMap::new();
+    let task_id = s.create_task(query_map, update_map);
+    thread::sleep(Duration::from_secs(7));
+    s.query_task(task_id, "status");
+}
+
+#[test]
 fn test_query_missing_key_in_task() {
     let s = ServerThread::new();
 

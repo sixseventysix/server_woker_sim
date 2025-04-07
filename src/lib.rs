@@ -16,7 +16,7 @@ const MAX_CONCURRENT_TASKS: usize = 4;
 // before WorkerThread is dropped, so dropping of all channels is graceful and we don't have any dangling variables.
 const TASK_TIMEOUT: u64 = 2;
 const LISTENER_TIMEOUT: u64 = 5;
-const WORKER_TIMEOUT: u64 = 1;
+const WORKER_TIMEOUT: u64 = 5;
 
 type TaskId = usize;
 type RequestId = usize;
@@ -66,8 +66,9 @@ pub enum TaskRequest {
 
 // enum with a similar structure to TaskRequest, but made especially for a specific Task.
 // this is why the id: TaskId attribute is removed
+// think of it as a subset of TaskRequest
 #[derive(Debug)]
-pub enum TaskControl {
+pub enum TaskInstruction {
     Query {
         req_id: usize,
         query_id: String,
@@ -83,19 +84,23 @@ pub enum TaskControl {
 // thread running task
 pub struct TaskThread {
     pub task: Task,
-    pub rx: Receiver<TaskControl>,
+    pub rx: Receiver<TaskInstruction>,
 }
 
 impl TaskThread {
     fn run(mut self) {
         let timeout_duration = Duration::from_secs(TASK_TIMEOUT);
         loop {
-            println!("[Task {}] Waiting for control message...", self.task.id);
+            println!("[Task {}] Waiting for instruction...", self.task.id);
             match self.rx.recv_timeout(timeout_duration) {
                 Ok(msg) => {
-                    println!("[Task {}] Received control message: {:?}", self.task.id, msg);
+                    println!("[Task {}] Received instruction: {:?}", self.task.id, msg);
+                    // receives a TaskInstruction which it processes
                     match msg {
-                        TaskControl::Query { req_id, query_id, result_tx } => {
+                        // gets value from a query_map for some query_id
+                        TaskInstruction::Query { req_id, query_id, result_tx } => {
+                            // result_tx is shared directly to TaskThread via ServerThread so that it can transmit result
+                            // messages directly back to ServerThread
                             match self.task.query_map.get(&query_id) {
                                 Some(value) => {
                                     let _ = result_tx.send(TaskResult::QueryOk {
@@ -113,8 +118,12 @@ impl TaskThread {
                                 }
                             }
                         }
-                        TaskControl::Update { req_id, update_id, result_tx } => {
+                        // over here, this does not actually update any values
+                        // for the sake of simplicity, it just runs some function without any parameters
+                        // we assume that update_fn would alter some value (which we expect to be queried using QueryRequest)
+                        TaskInstruction::Update { req_id, update_id, result_tx } => {
                             if let Some(update_fn) = self.task.update_map.get_mut(&update_id) {
+                                println!("[Task {}] Running update function", self.task.id);
                                 update_fn();
                                 let _ = result_tx.send(TaskResult::UpdateOk {
                                     req_id,
@@ -133,7 +142,7 @@ impl TaskThread {
     
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     println!(
-                        "[Task {}] No control message received for {:?}. Exiting due to inactivity.",
+                        "[Task {}] No instruction received for {:?}. Exiting due to inactivity.",
                         self.task.id, timeout_duration
                     );
                     break;
@@ -141,7 +150,7 @@ impl TaskThread {
     
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     println!(
-                        "[Task {}] Control channel disconnected. Exiting task loop.",
+                        "[Task {}] Worker-Task channel disconnected. Exiting task loop.",
                         self.task.id
                     );
                     break;
@@ -156,8 +165,8 @@ impl TaskThread {
 
 // thread that runs worker
 pub struct WorkerThread {
-    task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskControl>>>>,
-    active_tasks: Arc<AtomicUsize>,
+    task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskInstruction>>>>, // maps a Task to a transmitter that transmits from worker to task
+    active_tasks: Arc<AtomicUsize>,                             // number of active tasks (used for throttling)
 }
 
 impl WorkerThread {
@@ -176,6 +185,7 @@ impl WorkerThread {
         let task_map = Arc::clone(&self.task_map);
         let active_tasks = Arc::clone(&self.active_tasks);
 
+        // while no shutdown noted
         while !shutdown_flag.load(Ordering::SeqCst) {
             match rx.recv_timeout(Duration::from_secs(WORKER_TIMEOUT)) {
                 Ok(msg) => match msg {
@@ -186,6 +196,9 @@ impl WorkerThread {
                         update_map,
                         result_tx,
                     } => {
+                        // if active tasks are more than MAX_CONCURRENT_TASKS, throttle the oncoming tasks
+                        // these are assumed to be handled by the server (via a buffer)
+                        // worker thread does not buffer oncoming tasks when it is throttled
                         if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
                             println!("[req:{req_id}] [WorkerThread] Task {id} rejected due to throttling");
                             let _ = result_tx.send(TaskResult::Throttled { req_id, id });
@@ -196,6 +209,8 @@ impl WorkerThread {
                         let task = Task { id, query_map, update_map };
 
                         task_map.lock().unwrap().insert(id, task_tx.clone());
+
+                        // a task is created
                         active_tasks.fetch_add(1, Ordering::SeqCst);
 
                         println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
@@ -207,14 +222,19 @@ impl WorkerThread {
                         thread::spawn(move || {
                             task_thread.run();
                             task_map_cloned.lock().unwrap().remove(&id);
+
+                            // task is completed
                             active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
+
                             println!("[WorkerThread] Task {id} finished and removed.");
                         });
                     }
 
                     TaskRequest::QueryTask { req_id, id, query_id, result_tx } => {
+                        // get specific task
                         if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                            tx.send(TaskControl::Query { req_id, query_id, result_tx }).ok();
+                            // send subset of the TaskRequest onto the specified task
+                            tx.send(TaskInstruction::Query { req_id, query_id, result_tx }).ok();
                         } else {
                             let _ = result_tx.send(TaskResult::NotFound {
                                 req_id,
@@ -225,8 +245,10 @@ impl WorkerThread {
                     }
 
                     TaskRequest::UpdateTask { req_id, id, update_id, result_tx } => {
+                        // get specific task
                         if let Some(tx) = task_map.lock().unwrap().get(&id) {
-                            tx.send(TaskControl::Update { req_id, update_id, result_tx }).ok();
+                            // send subset of the TaskRequest onto the specified task
+                            tx.send(TaskInstruction::Update { req_id, update_id, result_tx }).ok();
                         } else {
                             let _ = result_tx.send(TaskResult::NotFound {
                                 req_id,
@@ -236,8 +258,18 @@ impl WorkerThread {
                         }
                     }
                 },
-                Err(_) => {
-                    println!("[WorkerThread] recv_timeout hit, checking shutdown flag again...");
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // commented this println statement out so as not to overwhlem the logs
+                    // happens often as server thread will close the sender as soon as all tasks are sent
+                    // there might be some time in between all tasks being sent and all tasks being completed.
+                    // uncommenting this would just cause a lot of annoying log messages.
+
+                    // println!("[WorkerThread] channel is empty and sending half is closed. Exiting.");
+                    // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    continue;
+                }
+                Err(e) => {
+                    println!("[WorkerThread] {e}");
                     continue;
                 }
             }
@@ -248,20 +280,29 @@ impl WorkerThread {
 }
 
 pub struct ServerThread {
-    pub worker_tx: Sender<TaskRequest>,
-    pub result_tx: mpsc::Sender<TaskResult>,
-    pub request_counter: AtomicUsize,
+    pub worker_tx: Sender<TaskRequest>,          // transmitter from server to worker, so it has to own it
+    pub result_tx: mpsc::Sender<TaskResult>,     // owns it so it can clone the mpsc::Sender and sends it to a TaskThread
+
+    // both are AtomicUsize to ensure any operations are atomic.
+    // using strict SeqCst ordering for this
+    pub request_counter: AtomicUsize,            
     pub task_id_counter: AtomicUsize,
-    pub listener_handle: Option<JoinHandle<()>>,
+
+    pub listener_handle: Option<JoinHandle<()>>, // join handle for the listener thread
 }
 
 impl ServerThread {
     pub fn new() -> Self {
-        let (worker_tx, worker_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
+        let (worker_tx, worker_rx) = mpsc::channel(); // channel for server-worker comm
+        let (result_tx, result_rx) = mpsc::channel(); // channel for task-server comm for results
         
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        // shutdown behaviour is based on idle time
+        // if server does not send a task in a span of LISTENER_TIMEOUT idle time, listener thread shuts down as well as the worker
+        // idle time gets reset every time we have confirmation of a new TaskRequest because of the behaviour of recv_timeout
+        let shutdown_flag = Arc::new(AtomicBool::new(false)); // shutdown flag to be shared between listener and worker
         let shutdown_flag_for_listener = Arc::clone(&shutdown_flag);
+
+        // worker thread
         thread::spawn({
             let shutdown = Arc::clone(&shutdown_flag);
             move || {
@@ -270,10 +311,12 @@ impl ServerThread {
             }
         });
 
+        // listener thread
         let listener_handle = thread::spawn(move || {
             loop{
                 match result_rx.recv_timeout(Duration::from_secs(LISTENER_TIMEOUT)) {
                     Ok(result) => {
+                        // recieved some output from a TaskThread
                         match result {
                             TaskResult::QueryOk { req_id, id, value } => {
                                 println!("[req:{req_id}] Query result for task {id}: {value}");
@@ -298,12 +341,12 @@ impl ServerThread {
                             }
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {             // shutdown condition: idle time has reached LISTENER_TIMEOUT
                         println!("[Listener] No activity. Shutting down...");
                         shutdown_flag_for_listener.store(true, Ordering::SeqCst);
                         break;
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {       // shutdown condition: channel has already been severed
                         println!("[Listener] Channel disconnected. Shutting down...");
                         shutdown_flag_for_listener.store(true, Ordering::SeqCst);
                         break;
@@ -321,10 +364,18 @@ impl ServerThread {
         }
     }
 
+    // current issue with these two is that they are 64 bit unsigned integers and at some point they will overflow
+    // for a large system, we will need better handling of uuids than this
+    // one solution could be to maintain a pool of active tasks and TaskRequests and make sure any new generated id
+    // is not already in the pool
+    // not implemented here
+
+    // unique TaskRequest identifier
     pub fn next_req_id(&self) -> RequestId {
         self.request_counter.fetch_add(1, Ordering::SeqCst)
     }
 
+    // unique task identifier
     pub fn next_task_id(&self) -> TaskId {
         self.task_id_counter.fetch_add(1, Ordering::SeqCst)
     }
@@ -337,29 +388,35 @@ impl ServerThread {
         let req_id = self.next_req_id();
         let id = self.next_task_id();
         println!("[req:{req_id}] [ServerThread] Sending create task to worker for Task {id}");
-        self.worker_tx
+        let _ = self.worker_tx
             .send(TaskRequest::CreateTask {
                 req_id,
                 id,
                 query_map,
                 update_map,
                 result_tx: self.result_tx.clone(),
-            })
-            .unwrap();
+            });
 
         id
     }
 
     pub fn query_task(&self, id: TaskId, query_id: &str) {
         let req_id = self.next_req_id();
-        self.worker_tx
-            .send(TaskRequest::QueryTask {
-                req_id,
-                id,
-                query_id: query_id.to_string(),
-                result_tx: self.result_tx.clone(),
-            })
-            .unwrap();
+        match self.worker_tx.send(TaskRequest::QueryTask {
+            req_id,
+            id,
+            query_id: query_id.to_string(),
+            result_tx: self.result_tx.clone(),
+        }) {
+            Ok(()) => {
+                println!("[req:{req_id}] [ServerThread] Query task {id} sent to worker.");
+            }
+            Err(err) => {
+                println!(
+                    "[req:{req_id}] [ServerThread] Failed to send query task {id} to worker: {err:?}"
+                );
+            }
+        }
     }
 
     pub fn update_task(&self, id: TaskId, update_id: &str) {
@@ -374,6 +431,8 @@ impl ServerThread {
             .unwrap();
     }
 
+    // server thread exits early, so we let the listener handle join so it can finish executing and print its logs
+    // for a system without timeouts and one with an infinitely running server thread, we can use std::thread::park
     pub fn join_listener(self) {
         if let Some(handle) = self.listener_handle {
             let _ = handle.join();
