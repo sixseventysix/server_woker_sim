@@ -441,7 +441,7 @@ impl ServerThread {
 
     // server thread exits early, so we let the listener handle join so it can finish executing and print its logs
     // for a system without timeouts and one with an infinitely running server thread, we can use std::thread::park
-    pub fn join_listener(self) {
+    pub fn shutdown(self) {
         if let Some(handle) = self.listener_handle {
             let _ = handle.join();
         }

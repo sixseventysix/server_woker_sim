@@ -64,21 +64,21 @@ fn test_update_missing_id_in_task() {
 
     let task_id = s.create_task(query_map, update_map);
     s.update_task(task_id, "bad_update_id");
-    s.join_listener();
+    s.shutdown();
 }
 
 #[test]
 fn test_query_nonexistent_task() {
     let s = ServerThread::new();
     s.query_task(999, "any_key");
-    s.join_listener();
+    s.shutdown();
 }
 
 #[test]
 fn test_update_nonexistent_task() {
     let s = ServerThread::new();
     s.update_task(888, "some_update");
-    s.join_listener();
+    s.shutdown();
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn test_task_throttling_behavior() {
             [("mark_done".into(), Box::new(|| "Done".to_string()) as Box<dyn FnMut() -> String + Send>)].into()
         );
     }
-    s.join_listener();
+    s.shutdown();
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn test_queried_task_w_throttled_tasks() {
     s.update_task(task_id[1], "mark_done");
     s.query_task(task_id[2], "get_status");
     s.query_task(task_id[0], "invalid_query");
-    s.join_listener();
+    s.shutdown();
 }
 
 #[test]
@@ -147,5 +147,5 @@ fn test_complex_task_interactions() {
     server.update_task(task_ids[3], "mark_done");
     server.query_task(task_ids[1], "get_status");
 
-    server.join_listener();
+    server.shutdown();
 }

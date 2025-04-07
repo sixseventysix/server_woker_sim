@@ -14,5 +14,5 @@ fn main() {
     s.query_task(task_id[0], "get_status");
     s.update_task(task_id[0], "mark_done");
     s.query_task(task_id[0], "invalid_query");
-    s.join_listener();
+    s.shutdown();
 }
