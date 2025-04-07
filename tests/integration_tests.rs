@@ -64,18 +64,21 @@ fn test_update_missing_id_in_task() {
 
     let task_id = s.create_task(query_map, update_map);
     s.update_task(task_id, "bad_update_id");
+    s.join_listener();
 }
 
 #[test]
 fn test_query_nonexistent_task() {
     let s = ServerThread::new();
     s.query_task(999, "any_key");
+    s.join_listener();
 }
 
 #[test]
 fn test_update_nonexistent_task() {
     let s = ServerThread::new();
     s.update_task(888, "some_update");
+    s.join_listener();
 }
 
 #[test]
@@ -84,9 +87,10 @@ fn test_task_throttling_behavior() {
     for i in 0..6 {
         s.create_task(
             [("get_status".into(), "idle".into())].into(),
-            [("mark_done".into(), Box::new(|| println!("Marked done")) as Box<dyn FnMut() + Send>)].into()
+            [("mark_done".into(), Box::new(|| "Done".to_string()) as Box<dyn FnMut() -> String + Send>)].into()
         );
     }
+    s.join_listener();
 }
 
 #[test]
@@ -94,9 +98,15 @@ fn test_queried_task_w_throttled_tasks() {
     let s = ServerThread::new();
     let mut task_id = [0; 6];
     for i in 0..6 {
-        task_id[i] = s.create_task(
+        let update_map = HashMap::from([
+            (
+                "mark_done".into(),
+                Box::new(|| "done".to_string()) as Box<dyn FnMut() -> String + Send + 'static>,
+            ),
+        ]);
+        task_id[i] = s.create_task(            
             [("get_status".into(), "idle".into())].into(),
-            [("mark_done".into(), Box::new(|| println!("Marked done")) as Box<dyn FnMut() + Send>)].into()
+            update_map
         );
     }
 
@@ -104,6 +114,7 @@ fn test_queried_task_w_throttled_tasks() {
     s.update_task(task_id[1], "mark_done");
     s.query_task(task_id[2], "get_status");
     s.query_task(task_id[0], "invalid_query");
+    s.join_listener();
 }
 
 #[test]
@@ -112,9 +123,15 @@ fn test_complex_task_interactions() {
 
     let mut task_ids = Vec::new();
     for i in 0..4 {
+        let update_map = HashMap::from([
+            (
+                "mark_done".into(),
+                Box::new(|| "done".to_string()) as Box<dyn FnMut() -> String + Send + 'static>,
+            ),
+        ]);
         let task_id = server.create_task(
             [("get_status".into(), format!("idle_{}", i))].into(),
-            [("mark_done".into(), Box::new(move || println!("[Task {i}] Marked done")) as Box<dyn FnMut() + Send>)].into()
+            update_map           
         );
         task_ids.push(task_id);
     }

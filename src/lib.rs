@@ -24,7 +24,7 @@ type RequestId = usize;
 pub struct Task {
     pub id: usize,
     pub query_map: HashMap<String, String>,
-    pub update_map: HashMap<String, Box<dyn FnMut() + Send>>,
+    pub update_map: HashMap<String, Box<dyn FnMut() -> String + Send + 'static>>
 }
 
 // to be returned when a TaskRequest is sent
@@ -34,7 +34,7 @@ pub struct Task {
 pub enum TaskResult {
     QueryOk { req_id: RequestId, id: TaskId, value: String },
     QueryError { req_id: RequestId, id: TaskId, msg: String },
-    UpdateOk { req_id: RequestId, id: TaskId },
+    UpdateOk { req_id: RequestId, id: TaskId, value: String },
     UpdateError { req_id: RequestId, id: TaskId, msg: String },
     NotFound { req_id: RequestId, id: TaskId, ctx: &'static str },
     Throttled { req_id: RequestId, id: TaskId },
@@ -47,7 +47,7 @@ pub enum TaskRequest {
         req_id: RequestId,
         id: TaskId,
         query_map: HashMap<String, String>,
-        update_map: HashMap<String, Box<dyn FnMut() + Send>>,
+        update_map: HashMap<String, Box<dyn FnMut() -> String + Send + 'static>>,
         result_tx: Sender<TaskResult>,
     },
     QueryTask {
@@ -124,10 +124,11 @@ impl TaskThread {
                         TaskInstruction::Update { req_id, update_id, result_tx } => {
                             if let Some(update_fn) = self.task.update_map.get_mut(&update_id) {
                                 println!("[Task {}] Running update function", self.task.id);
-                                update_fn();
+                                let value = update_fn();
                                 let _ = result_tx.send(TaskResult::UpdateOk {
                                     req_id,
                                     id: self.task.id,
+                                    value,
                                 });
                             } else {
                                 let _ = result_tx.send(TaskResult::UpdateError {
@@ -166,7 +167,7 @@ impl TaskThread {
 // thread that runs worker
 pub struct WorkerThread {
     task_map: Arc<Mutex<HashMap<TaskId, Sender<TaskInstruction>>>>, // maps a Task to a transmitter that transmits from worker to task
-    active_tasks: Arc<AtomicUsize>,                             // number of active tasks (used for throttling)
+    active_tasks: Arc<AtomicUsize>,                                 // number of active tasks (used for throttling)
 }
 
 impl WorkerThread {
@@ -324,8 +325,8 @@ impl ServerThread {
                             TaskResult::QueryError { req_id, id, msg } => {
                                 println!("[req:{req_id}] Query failed for task {id}: {msg}");
                             }
-                            TaskResult::UpdateOk { req_id, id } => {
-                                println!("[req:{req_id}] Update OK for task {id}");
+                            TaskResult::UpdateOk { req_id, id , value } => {
+                                println!("[req:{req_id}] Update result for task {id}: {value}");
                             }
                             TaskResult::UpdateError { req_id, id, msg } => {
                                 println!("[req:{req_id}] Update failed for task {id}: {msg}");
@@ -383,7 +384,7 @@ impl ServerThread {
     pub fn create_task(
         &self,
         query_map: HashMap<String, String>,
-        update_map: HashMap<String, Box<dyn FnMut() + Send>>,
+        update_map: HashMap<String, Box<dyn FnMut() -> String + Send + 'static>>
     ) -> TaskId {
         let req_id = self.next_req_id();
         let id = self.next_task_id();

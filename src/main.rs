@@ -7,7 +7,7 @@ fn main() {
     for i in 0..6 {
         task_id[i] = s.create_task(
             [("get_status".into(), "idle".into())].into(),
-            [("mark_done".into(), Box::new(|| println!("Marked done")) as Box<dyn FnMut() + Send>)].into()
+            [("mark_done".into(), Box::new(|| "Done".to_string()) as Box<dyn FnMut() -> String + Send>)].into()
         );
     }
 
