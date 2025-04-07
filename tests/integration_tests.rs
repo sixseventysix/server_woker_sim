@@ -14,6 +14,7 @@ fn test_simple_success() {
 
     let task_id = s.create_task(query_map, update_map);
     s.query_task(task_id, "status");
+    s.shutdown();
 }
 
 #[test]
@@ -26,6 +27,7 @@ fn test_query_after_completion() {
     let task_id = s.create_task(query_map, update_map);
     thread::sleep(Duration::from_secs(3)); // make sure time is more than TASK_TIMEOUT and less than LISTENER_TIMEOUT
     s.query_task(task_id, "status");
+    s.shutdown();
 }
 
 #[test]
@@ -38,6 +40,7 @@ fn test_query_after_worker_dropped() {
     let task_id = s.create_task(query_map, update_map);
     thread::sleep(Duration::from_secs(7));
     s.query_task(task_id, "status");
+    s.shutdown();
 }
 
 #[test]
@@ -51,6 +54,7 @@ fn test_query_missing_key_in_task() {
 
     let task_id = s.create_task(query_map, update_map);
     s.query_task(task_id, "nonexistent_key");
+    s.shutdown();
 }
 
 #[test]

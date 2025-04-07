@@ -99,6 +99,7 @@ impl TaskThread {
                     match msg {
                         // gets value from a query_map for some query_id
                         TaskInstruction::Query { req_id, query_id, result_tx } => {
+                            let _ = result_tx.send(TaskResult::ReceivedRequest);
                             // result_tx is shared directly to TaskThread via ServerThread so that it can transmit result
                             // messages directly back to ServerThread
                             match self.task.query_map.get(&query_id) {
@@ -122,6 +123,7 @@ impl TaskThread {
                         // for the sake of simplicity, it just runs some function without any parameters
                         // we assume that update_fn would alter some value (which we expect to be queried using QueryRequest)
                         TaskInstruction::Update { req_id, update_id, result_tx } => {
+                            let _ = result_tx.send(TaskResult::ReceivedRequest);
                             if let Some(update_fn) = self.task.update_map.get_mut(&update_id) {
                                 println!("[Task {}] Running update function", self.task.id);
                                 let value = update_fn();
@@ -327,22 +329,22 @@ impl ServerThread {
                         // recieved some output from a TaskThread
                         match result {
                             TaskResult::QueryOk { req_id, id, value } => {
-                                println!("[req:{req_id}] Query result for task {id}: {value}");
+                                println!("[req:{req_id}] [Listener] Query result for task {id}: {value}");
                             }
                             TaskResult::QueryError { req_id, id, msg } => {
-                                println!("[req:{req_id}] Query failed for task {id}: {msg}");
+                                println!("[req:{req_id}] [Listener] Query failed for task {id}: {msg}");
                             }
                             TaskResult::UpdateOk { req_id, id , value } => {
-                                println!("[req:{req_id}] Update result for task {id}: {value}");
+                                println!("[req:{req_id}] [Listener] Update result for task {id}: {value}");
                             }
                             TaskResult::UpdateError { req_id, id, msg } => {
-                                println!("[req:{req_id}] Update failed for task {id}: {msg}");
+                                println!("[req:{req_id}] [Listener] Update failed for task {id}: {msg}");
                             }
                             TaskResult::NotFound { req_id, id, ctx } => {
-                                println!("[req:{req_id}] Task {id} not found: {ctx}");
+                                println!("[req:{req_id}] [Listener] Task {id} not found: {ctx}");
                             }
                             TaskResult::Throttled { req_id, id } => {
-                                println!("[req:{req_id}] Creation for task {id} failed: WorkerThread is throttled");
+                                println!("[req:{req_id}] [Listener] Creation for task {id} failed: WorkerThread is throttled");
                             }
                             TaskResult::ReceivedRequest => {
                                 println!("[Listener] Received new request. Resetting idle timer.");
