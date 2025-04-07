@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::sync::atomic::AtomicBool;
 
 pub const MAX_CONCURRENT_TASKS: usize = 4;
+pub const MAX_REQ_ID: usize = 100; // maximum number of request ids that can be generated
 
 // assumption 1: TASK_TIMEOUT is larger than how long any task would take to execute a request
 // assumption 2: LISTENER_TIMEOUT > TASK_TIMEOUT
@@ -20,6 +21,7 @@ pub const WORKER_TIMEOUT: u64 = 5;
 
 type TaskId = usize;
 type RequestId = usize;
+type SharedResults = Arc<Mutex<Vec<Option<TaskResult>>>>;
 
 pub struct Task {
     pub id: usize,
@@ -30,7 +32,7 @@ pub struct Task {
 // to be returned when a TaskRequest is sent
 // ReceivedRequest is sent whenever a Task receives a new TaskRequest
 // this will later be followed by another TaskResult that shows the appropriate response for that TaskRequest
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TaskResult {
     QueryOk { req_id: RequestId, id: TaskId, value: String },
     QueryError { req_id: RequestId, id: TaskId, msg: String },
@@ -298,6 +300,7 @@ pub struct ServerThread {
     pub request_counter: AtomicUsize,            
     pub task_id_counter: AtomicUsize,
 
+    pub results: Arc<Mutex<Vec<Option<TaskResult>>>>,
     pub listener_handle: Option<JoinHandle<()>>, // join handle for the listener thread
 }
 
@@ -312,6 +315,11 @@ impl ServerThread {
         let shutdown_flag = Arc::new(AtomicBool::new(false)); // shutdown flag to be shared between listener and worker
         let shutdown_flag_for_listener = Arc::clone(&shutdown_flag);
 
+        let mut results_vec = Vec::with_capacity(MAX_REQ_ID);
+        results_vec.resize_with(MAX_REQ_ID, || None);
+        let results: SharedResults = Arc::new(Mutex::new(results_vec));
+        let results_for_listener = Arc::clone(&results);
+
         // worker thread
         thread::spawn({
             let shutdown = Arc::clone(&shutdown_flag);
@@ -323,32 +331,26 @@ impl ServerThread {
 
         // listener thread
         let listener_handle = thread::spawn(move || {
-            loop{
+            loop {
                 match result_rx.recv_timeout(Duration::from_secs(LISTENER_TIMEOUT)) {
                     Ok(result) => {
                         // recieved some output from a TaskThread
-                        match result {
-                            TaskResult::QueryOk { req_id, id, value } => {
-                                println!("[req:{req_id}] [Listener] Query result for task {id}: {value}");
+                        println!("[Listener] {:?}", result);
+        
+                        if let Some(req_id) = match &result {
+                            TaskResult::QueryOk { req_id, .. }
+                            | TaskResult::QueryError { req_id, .. }
+                            | TaskResult::UpdateOk { req_id, .. }
+                            | TaskResult::UpdateError { req_id, .. }
+                            | TaskResult::NotFound { req_id, .. }
+                            | TaskResult::Throttled { req_id, .. } => Some(*req_id),
+                            TaskResult::ReceivedRequest => None,
+                        } {
+                            let mut results = results_for_listener.lock().unwrap();
+                            if results.len() <= req_id {
+                                results.resize(req_id + 1, None);
                             }
-                            TaskResult::QueryError { req_id, id, msg } => {
-                                println!("[req:{req_id}] [Listener] Query failed for task {id}: {msg}");
-                            }
-                            TaskResult::UpdateOk { req_id, id , value } => {
-                                println!("[req:{req_id}] [Listener] Update result for task {id}: {value}");
-                            }
-                            TaskResult::UpdateError { req_id, id, msg } => {
-                                println!("[req:{req_id}] [Listener] Update failed for task {id}: {msg}");
-                            }
-                            TaskResult::NotFound { req_id, id, ctx } => {
-                                println!("[req:{req_id}] [Listener] Task {id} not found: {ctx}");
-                            }
-                            TaskResult::Throttled { req_id, id } => {
-                                println!("[req:{req_id}] [Listener] Creation for task {id} failed: WorkerThread is throttled");
-                            }
-                            TaskResult::ReceivedRequest => {
-                                println!("[Listener] Received new request. Resetting idle timer.");
-                            }
+                            results[req_id] = Some(result);
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {             // shutdown condition: idle time has reached LISTENER_TIMEOUT
@@ -370,6 +372,7 @@ impl ServerThread {
             result_tx: result_tx.clone(),
             request_counter: AtomicUsize::new(0),
             task_id_counter: AtomicUsize::new(0),
+            results,
             listener_handle: Some(listener_handle)
         }
     }
@@ -443,9 +446,36 @@ impl ServerThread {
 
     // server thread exits early, so we let the listener handle join so it can finish executing and print its logs
     // for a system without timeouts and one with an infinitely running server thread, we can use std::thread::park
-    pub fn shutdown(self) {
-        if let Some(handle) = self.listener_handle {
+    pub fn join_listener(&mut self) {
+        if let Some(handle) = self.listener_handle.take() {
             let _ = handle.join();
         }
     }
+}
+
+
+// this block is for testing purposes
+impl ServerThread {
+    pub fn expect(&self, req_id: usize, expected: &TaskResult) -> bool {
+        let results = self.results.lock().unwrap();
+        match &results[req_id] {
+            Some(actual) if actual == expected => {
+                println!("[EXPECT] req:{req_id} matched expected result.");
+                true
+            }
+            Some(actual) => {
+                println!("[EXPECT] req:{req_id} mismatch.\nExpected: {:?}\nGot: {:?}", expected, actual);
+                false
+            },
+            None => {
+                println!("[EXPECT] req:{req_id} had no result.");
+                false
+            }
+        }
+    }
+
+    pub fn expect_none(&self, req_id: usize) -> bool {
+        self.results.lock().unwrap()[req_id].is_none()
+    }
+    
 }
