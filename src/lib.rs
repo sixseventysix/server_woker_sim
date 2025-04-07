@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::sync::atomic::AtomicBool;
 
-const MAX_CONCURRENT_TASKS: usize = 4;
+pub const MAX_CONCURRENT_TASKS: usize = 4;
 
 // assumption 1: TASK_TIMEOUT is larger than how long any task would take to execute a request
 // assumption 2: LISTENER_TIMEOUT > TASK_TIMEOUT
@@ -14,9 +14,9 @@ const MAX_CONCURRENT_TASKS: usize = 4;
 // the listener thread too hastily
 // this also ensures that TaskThreads are all dropped before the Listener Thread, and the Listener Thread is always dropped
 // before WorkerThread is dropped, so dropping of all channels is graceful and we don't have any dangling variables.
-const TASK_TIMEOUT: u64 = 2;
-const LISTENER_TIMEOUT: u64 = 5;
-const WORKER_TIMEOUT: u64 = 5;
+pub const TASK_TIMEOUT: u64 = 2;
+pub const LISTENER_TIMEOUT: u64 = 5;
+pub const WORKER_TIMEOUT: u64 = 5;
 
 type TaskId = usize;
 type RequestId = usize;

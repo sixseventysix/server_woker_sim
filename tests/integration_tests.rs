@@ -25,7 +25,7 @@ fn test_query_after_completion() {
     query_map.insert("status".into(), "running".into());
     let update_map = HashMap::new();
     let task_id = s.create_task(query_map, update_map);
-    thread::sleep(Duration::from_secs(3)); // make sure time is more than TASK_TIMEOUT and less than LISTENER_TIMEOUT
+    thread::sleep(Duration::from_secs(TASK_TIMEOUT + 1)); // make sure time is more than TASK_TIMEOUT and less than LISTENER_TIMEOUT
     s.query_task(task_id, "status");
     s.shutdown();
 }
@@ -38,7 +38,7 @@ fn test_query_after_worker_dropped() {
     query_map.insert("status".into(), "running".into());
     let update_map = HashMap::new();
     let task_id = s.create_task(query_map, update_map);
-    thread::sleep(Duration::from_secs(7));
+    thread::sleep(Duration::from_secs(LISTENER_TIMEOUT + 1));
     s.query_task(task_id, "status");
     s.shutdown();
 }
@@ -168,3 +168,37 @@ fn test_multiple_queries_in_quick_succession() {
     }
     s.shutdown();
 }
+
+#[test]
+fn test_throttling_recovery_after_timeout() {
+    let s = ServerThread::new();
+    let mut task_ids = vec![];
+
+    for _ in 0..MAX_CONCURRENT_TASKS {
+        let id = s.create_task(
+            [("info".into(), "live".into())].into(),
+            HashMap::new(),
+        );
+        task_ids.push(id);
+    }
+
+    // these should be throttled
+    for _ in 0..2 {
+        s.create_task(
+            [("info".into(), "extra".into())].into(),
+            HashMap::new(),
+        );
+    }
+
+    thread::sleep(Duration::from_secs(TASK_TIMEOUT + 1));  // wait for some tasks to timeout
+
+    let id = s.create_task(
+        [("info".into(), "retry".into())].into(),
+        HashMap::new(),
+    );
+
+    s.query_task(id, "info");
+
+    s.shutdown();
+}
+
