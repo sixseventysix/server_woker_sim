@@ -153,3 +153,18 @@ fn test_complex_task_interactions() {
 
     server.shutdown();
 }
+
+#[test]
+fn test_multiple_queries_in_quick_succession() {
+    let s = ServerThread::new();
+
+    let mut query_map = HashMap::new();
+    query_map.insert("status".into(), "busy".into());
+
+    let task_id = s.create_task(query_map, HashMap::new());
+
+    for _ in 0..10 {
+        s.query_task(task_id, "status");
+    }
+    s.shutdown();
+}
