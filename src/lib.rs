@@ -191,7 +191,7 @@ impl WorkerThread {
         let active_tasks = Arc::clone(&self.active_tasks);
 
         // while no shutdown noted
-        while !shutdown_flag.load(Ordering::SeqCst) {
+        while !shutdown_flag.load(Ordering::Relaxed) {
             match rx.recv_timeout(Duration::from_secs(WORKER_TIMEOUT)) {
                 Ok(msg) => match msg {
                     TaskRequest::CreateTask {
@@ -204,7 +204,7 @@ impl WorkerThread {
                         // if active tasks are more than MAX_CONCURRENT_TASKS, throttle the oncoming tasks
                         // these are assumed to be handled by the server (via a buffer)
                         // worker thread does not buffer oncoming tasks when it is throttled
-                        if active_tasks.load(Ordering::SeqCst) >= MAX_CONCURRENT_TASKS {
+                        if active_tasks.load(Ordering::Acquire) >= MAX_CONCURRENT_TASKS {
                             println!("[req:{req_id}] [WorkerThread] Task {id} rejected due to throttling");
                             let _ = result_tx.send(TaskResult::Throttled { req_id, id });
                             continue;
@@ -216,7 +216,7 @@ impl WorkerThread {
                         task_map.lock().unwrap().insert(id, task_tx.clone());
 
                         // a task is created
-                        active_tasks.fetch_add(1, Ordering::SeqCst);
+                        active_tasks.fetch_add(1, Ordering::Relaxed);
 
                         println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
 
@@ -229,7 +229,7 @@ impl WorkerThread {
                             task_map_cloned.lock().unwrap().remove(&id);
 
                             // task is completed
-                            active_tasks_cloned.fetch_sub(1, Ordering::SeqCst);
+                            active_tasks_cloned.fetch_sub(1, Ordering::Release);
 
                             println!("[WorkerThread] Task {id} finished and removed.");
                         });
@@ -355,12 +355,12 @@ impl ServerThread {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {             // shutdown condition: idle time has reached LISTENER_TIMEOUT
                         println!("[Listener] No activity. Shutting down...");
-                        shutdown_flag_for_listener.store(true, Ordering::SeqCst);
+                        shutdown_flag_for_listener.store(true, Ordering::Relaxed);
                         break;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {       // shutdown condition: channel has already been severed
                         println!("[Listener] Channel disconnected. Shutting down...");
-                        shutdown_flag_for_listener.store(true, Ordering::SeqCst);
+                        shutdown_flag_for_listener.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
