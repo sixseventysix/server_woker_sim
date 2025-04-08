@@ -231,9 +231,10 @@ impl WorkerThread {
 
                         thread::spawn(move || {
                             task_thread.run();
-                            task_map_cloned.lock().unwrap().remove(&id);
 
                             // task is completed
+                            task_map_cloned.lock().unwrap().remove(&id);
+                            
                             // Ordering::Release says: "all memory writes before this (like removing from task_map) 
                             // must be visible to other threads that later do an Acquire load on this atomic."
                             active_tasks_cloned.fetch_sub(1, Ordering::Release);
