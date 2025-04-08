@@ -303,9 +303,8 @@ pub struct ServerThread {
     pub result_tx: mpsc::Sender<TaskResult>,     // owns it so it can clone the mpsc::Sender and sends it to a TaskThread
 
     // both are AtomicUsize to ensure any operations are atomic.
-    // using strict SeqCst ordering for this
-    pub request_counter: AtomicUsize,            
-    pub task_id_counter: AtomicUsize,
+    pub request_counter: usize,
+    pub task_id_counter: usize,
 
     pub results: Arc<Mutex<Vec<Option<TaskResult>>>>,
     pub listener_handle: Option<JoinHandle<()>>, // join handle for the listener thread
@@ -322,6 +321,8 @@ impl ServerThread {
         let shutdown_flag = Arc::new(AtomicBool::new(false)); // shutdown flag to be shared between listener and worker
         let shutdown_flag_for_listener = Arc::clone(&shutdown_flag);
 
+        // chance for index overflow here
+        // we are trusting that the server knows not to overflow its own vector
         let mut results_vec = Vec::with_capacity(MAX_REQ_ID);
         results_vec.resize_with(MAX_REQ_ID, || None);
         let results: SharedResults = Arc::new(Mutex::new(results_vec));
@@ -377,8 +378,8 @@ impl ServerThread {
         Self {
             worker_tx,
             result_tx: result_tx.clone(),
-            request_counter: AtomicUsize::new(0),
-            task_id_counter: AtomicUsize::new(0),
+            request_counter: 0,
+            task_id_counter: 0,
             results,
             listener_handle: Some(listener_handle)
         }
@@ -391,17 +392,21 @@ impl ServerThread {
     // not implemented here
 
     // unique TaskRequest identifier
-    pub fn next_req_id(&self) -> RequestId {
-        self.request_counter.fetch_add(1, Ordering::SeqCst)
+    pub fn next_req_id(&mut self) -> RequestId {
+        let id = self.request_counter;
+        self.request_counter += 1;
+        id
     }
 
     // unique task identifier
-    pub fn next_task_id(&self) -> TaskId {
-        self.task_id_counter.fetch_add(1, Ordering::SeqCst)
+    pub fn next_task_id(&mut self) -> TaskId {
+        let id = self.task_id_counter;
+        self.task_id_counter += 1;
+        id
     }
 
     pub fn create_task(
-        &self,
+        &mut self,
         query_map: HashMap<String, String>,
         update_map: HashMap<String, Box<dyn FnMut() -> String + Send + 'static>>
     ) -> TaskId {
@@ -420,7 +425,7 @@ impl ServerThread {
         id
     }
 
-    pub fn query_task(&self, id: TaskId, query_id: &str) {
+    pub fn query_task(&mut self, id: TaskId, query_id: &str) {
         let req_id = self.next_req_id();
         match self.worker_tx.send(TaskRequest::QueryTask {
             req_id,
@@ -439,7 +444,7 @@ impl ServerThread {
         }
     }
 
-    pub fn update_task(&self, id: TaskId, update_id: &str) {
+    pub fn update_task(&mut self, id: TaskId, update_id: &str) {
         let req_id = self.next_req_id();
         self.worker_tx
             .send(TaskRequest::UpdateTask {
