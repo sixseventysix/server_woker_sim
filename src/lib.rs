@@ -204,6 +204,9 @@ impl WorkerThread {
                         // if active tasks are more than MAX_CONCURRENT_TASKS, throttle the oncoming tasks
                         // these are assumed to be handled by the server (via a buffer)
                         // worker thread does not buffer oncoming tasks when it is throttled
+
+                        // if the worker sees a lower value, Acquire ensures it also sees all 
+                        // memory writes that were made by the task thread before its Release-ordered fetch_sub.
                         if active_tasks.load(Ordering::Acquire) >= MAX_CONCURRENT_TASKS {
                             println!("[req:{req_id}] [WorkerThread] Task {id} rejected due to throttling");
                             let _ = result_tx.send(TaskResult::Throttled { req_id, id });
@@ -216,6 +219,8 @@ impl WorkerThread {
                         task_map.lock().unwrap().insert(id, task_tx.clone());
 
                         // a task is created
+                        // no other thread depends on seeing the increment instantly
+                        // just bumping a counter — atomicity is enough, ordering doesn't matter here.
                         active_tasks.fetch_add(1, Ordering::Relaxed);
 
                         println!("[req:{req_id}] [WorkerThread] Initializing task thread for Task {id}");
@@ -229,6 +234,8 @@ impl WorkerThread {
                             task_map_cloned.lock().unwrap().remove(&id);
 
                             // task is completed
+                            // Ordering::Release says: "all memory writes before this (like removing from task_map) 
+                            // must be visible to other threads that later do an Acquire load on this atomic."
                             active_tasks_cloned.fetch_sub(1, Ordering::Release);
 
                             println!("[WorkerThread] Task {id} finished and removed.");
